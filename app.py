@@ -202,10 +202,26 @@ def _generate_fallback_data():
     latest = {'krw_jpy': 880, 'usd_jpy': 150, 'us_yield': 4.3, 'vix': 15, 'rsi': 50, 'bb_lower': 860, 'bb_upper': 900, 'ma20': 880, 'macd':0, 'macd_signal':0}
     return df, latest, False
 
+# --- 💡 환율 보정 헬퍼 함수 ---
+def apply_toss_adjustment(df, latest_dict, adj):
+    d = df.copy()
+    l = latest_dict.copy()
+    if adj != 0:
+        for col in ['Open', 'High', 'Low', 'Close', 'MA20', 'BB_Upper', 'BB_Lower']:
+            if col in d.columns: d[col] += adj
+        for key in ['krw_jpy', 'ma20', 'bb_upper', 'bb_lower']:
+            if key in l: l[key] += adj
+    return d, l
+
 # --- 메인 시작 ---
 with st.sidebar:
     if get_db() is not None: st.success("☁️ GCP 클라우드 DB 연동 완료")
     else: st.warning("⚠️ GCP 연동 필요 (직접 만든 JPY-Trade 프로젝트의 열쇠를 사용하세요)")
+    
+    st.markdown("---")
+    st.subheader("⚙️ 토스뱅크 환율 동기화")
+    st.caption("글로벌 환율과 실제 토스 앱의 환율 차이를 보정하세요. (예: 토스가 1.5원 더 비싸면 +1.5 입력)")
+    toss_adj = st.number_input("환율 보정값 (+/- 원)", value=0.00, step=0.10, format="%.2f")
 
 st.title("💴 Yen-Vestor Pro (실시간 웹 대시보드)")
 
@@ -213,7 +229,9 @@ if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 with st.spinner("금융 데이터 동기화 중..."):
-    df_base, latest, is_live = fetch_global_data()
+    df_base_raw, latest_raw, is_live = fetch_global_data()
+    # 토스 환율 보정 적용
+    df_base, latest = apply_toss_adjustment(df_base_raw, latest_raw, toss_adj)
 
 tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 자산 관리 (성과 분석)", "📖 투자 전략 백과"])
 
@@ -223,7 +241,10 @@ tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 �
 with tab1:
     tf_options = {"30분": "1mo", "1시간": "3mo", "일봉": "1y", "주봉": "3y", "월봉": "10y"}
     selected_tf = st.radio("차트 간격", options=list(tf_options.keys()), index=2, horizontal=True, label_visibility="collapsed")
-    df_chart, latest_chart, _ = fetch_global_data(period=tf_options[selected_tf], interval="30m" if "30분" in selected_tf else "1h" if "1시간" in selected_tf else "1d")
+    df_chart_raw, latest_chart_raw, _ = fetch_global_data(period=tf_options[selected_tf], interval="30m" if "30분" in selected_tf else "1h" if "1시간" in selected_tf else "1d")
+    
+    # 탭1 차트용 데이터에도 토스 환율 보정 적용
+    df_chart, latest_chart = apply_toss_adjustment(df_chart_raw, latest_chart_raw, toss_adj)
 
     c1, c2, c3, c4 = st.columns(4)
     def m_card(col, title, val, unit, fn):
@@ -233,6 +254,9 @@ with tab1:
     m_card(c2, "💵 달러/엔", latest_chart['usd_jpy'], "엔", get_usd_status)
     m_card(c3, "🇺🇸 미 국채", latest_chart['us_yield'], "%", get_yield_status)
     m_card(c4, "📉 VIX 지수", latest_chart['vix'], "", get_vix_status)
+
+    if toss_adj != 0:
+        st.info(f"💡 현재 토스뱅크 환율 동기화가 적용되어 있습니다. (글로벌 기준가 대비 **{toss_adj:+.2f}원** 보정됨)")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.4)', dash='dash'), name='볼린저 상단'))
@@ -388,6 +412,7 @@ with tab2:
             cur_jpy -= amt; cur_principal -= (amt * avg_cost)
             records.append({'ID': t['id'], '날짜': t_date, '구분': '🔵 매도', '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"})
         
+        # 보정된 현재 환율을 기준으로 누적 수익 계산
         unrealized = (cur_jpy * (latest['krw_jpy'] / 100)) - cur_principal
         perf_history.append({'date': t_date, 'cumulative_profit': realized_p + unrealized})
 
@@ -421,7 +446,11 @@ with tab2:
         f1, f2, f3, f4 = st.columns([1.5, 2, 2, 1.5])
         t_in = f1.radio("q", ["🔴 매수", "🔵 매도"], label_visibility="collapsed")
         amt_in = f2.number_input("수량(JPY)", min_value=0, step=10000)
-        rate_in = f3.number_input("환율(원/100엔)", min_value=0.0, format="%.2f")
+        
+        # 보정된 현재 환율을 기본값으로 표시해 편의성 증대
+        default_rate = float(latest['krw_jpy']) if latest else 0.0
+        rate_in = f3.number_input("환율(원/100엔)", min_value=0.0, value=default_rate, format="%.2f")
+        
         if f4.form_submit_button("➕ 추가") and amt_in > 0:
             is_buy = "매수" in t_in
             if not is_buy and amt_in > cur_jpy: st.error("잔고 부족!")
