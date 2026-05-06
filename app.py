@@ -223,7 +223,15 @@ with st.sidebar:
     st.caption("글로벌 환율과 실제 토스 앱의 환율 차이를 보정하세요. (예: 토스가 1.5원 더 비싸면 +1.5 입력)")
     toss_adj = st.number_input("환율 보정값 (+/- 원)", value=0.00, step=0.10, format="%.2f")
 
-st.title("💴 Yen-Vestor Pro (실시간 웹 대시보드)")
+# 🔄 새로고침 버튼과 타이틀 나란히 배치
+col_title, col_refresh = st.columns([4, 1])
+with col_title:
+    st.title("💴 Yen-Vestor Pro")
+with col_refresh:
+    st.write("") # 타이틀과 줄 맞춤
+    if st.button("🔄 실시간 새로고침", use_container_width=True):
+        fetch_global_data.clear() # 캐시를 삭제하여 다음 호출 시 최신 데이터를 강제로 받아오게 함
+        st.rerun()
 
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
@@ -254,6 +262,18 @@ with tab1:
     m_card(c2, "💵 달러/엔", latest_chart['usd_jpy'], "엔", get_usd_status)
     m_card(c3, "🇺🇸 미 국채", latest_chart['us_yield'], "%", get_yield_status)
     m_card(c4, "📉 VIX 지수", latest_chart['vix'], "", get_vix_status)
+
+    # 💡 지표 가이드 (Expander) 추가
+    with st.expander("💡 각 지표가 무슨 의미인가요? (클릭하여 펼치기)"):
+        st.markdown("""
+        * **💵 달러/엔 환율 (USD/JPY)**: 달러 대비 엔화의 가치입니다. (보통 130~140엔이 평균 기준값)
+          * **150엔 이상 상승 시**: 엔화 가치가 바닥이라는 뜻입니다. 이때 일본은행(BOJ)이 억지로 환율을 내리기 위해 시장에 개입할 확률이 매우 높으므로, **원/엔 환율이 오를(엔화 강세) 좋은 매수 기회**가 됩니다.
+        * **🇺🇸 미국 10년물 국채 금리**: 글로벌 자금의 흐름을 결정하는 핵심 지표입니다. (보통 3.5%~4.0%가 기준값)
+          * **금리 하락 시 (좋음)**: 미국 금리가 내리면 투자자들이 돈을 빼서 다른 나라(일본 등)로 이동시킵니다. 즉, **금리가 내릴수록 엔화가 강세(상승)를 보입니다.**
+          * **금리 상승 시 (나쁨)**: 미국 금리가 오르면 굳이 이자도 안 주는 엔화를 들고 있을 이유가 없어져 엔화가 더 떨어집니다.
+        * **📉 VIX 공포 지수**: 세계 주식 시장 투자자들의 불안감을 수치화한 것입니다. (평상시 15 내외)
+          * **25 이상 급등 시 (좋음)**: 전쟁이나 경제 위기 등 패닉이 오면 사람들은 주식을 팔고 가장 안전한 자산인 **엔화로 대피**합니다. 이때 원/엔 환율이 폭등하므로, **보유 중인 엔화를 비싸게 팔(익절) 최고의 기회**가 됩니다.
+        """)
 
     if toss_adj != 0:
         st.info(f"💡 현재 토스뱅크 환율 동기화가 적용되어 있습니다. (글로벌 기준가 대비 **{toss_adj:+.2f}원** 보정됨)")
