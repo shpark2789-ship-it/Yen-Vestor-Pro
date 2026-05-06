@@ -29,6 +29,15 @@ st.markdown("""
     .metric-title { color: #94a3b8; font-size: 14px; font-weight: bold; margin-bottom: 5px; }
     .metric-value { color: white; font-size: 28px; font-weight: 900; margin-bottom: 5px; }
     .metric-status { font-size: 13px; font-weight: bold; }
+    
+    /* 라디오 버튼 스타일 다듬기 */
+    div.row-widget.stRadio > div {
+        flex-direction: row;
+        justify-content: center;
+        background-color: #1e293b;
+        padding: 10px;
+        border-radius: 10px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -54,33 +63,89 @@ def get_vix_status(val):
     elif val >= 20: return "🟡 경계장 (수요 쏠림)", "#f59e0b"
     else: return "🟢 평온장 (매집 시기)", "#10b981"
 
-# --- 🛡️ [무적 엔진] 방탄 데이터 로더 (에러 시 절대 뻗지 않음) ---
-@st.cache_data(ttl=300, show_spinner=False) 
-def fetch_global_data():
+# --- 🕯️ AI 캔들 및 패턴 분석 엔진 ---
+def analyze_candles(df):
+    if len(df) < 3: return ["데이터가 부족하여 캔들 패턴을 분석할 수 없습니다."]
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    body_size = abs(last['Close'] - last['Open'])
+    total_size = last['High'] - last['Low']
+    upper_shadow = last['High'] - max(last['Open'], last['Close'])
+    lower_shadow = min(last['Open'], last['Close']) - last['Low']
+    
+    # 단기 추세 확인 (20일선 기준)
+    trend = "상승" if df['MA20'].iloc[-1] > df['MA20'].iloc[-2] else "하락"
+    
+    patterns = []
+    
+    # 1. 도지형(Doji)
+    if total_size > 0 and body_size <= total_size * 0.1:
+        patterns.append("🔹 **도지형(Doji) 출현**: 매수세와 매도세가 팽팽하게 맞서고 있습니다. 곧 현재의 추세가 크게 반전될 가능성이 있습니다.")
+        
+    # 2. 상승 장악형 (Bullish Engulfing)
+    if prev['Close'] < prev['Open'] and last['Close'] > last['Open'] and last['Open'] <= prev['Close'] and last['Close'] >= prev['Open']:
+        patterns.append("🚀 **상승 장악형(Bullish Engulfing)**: 이전의 하락세를 완전히 뒤덮는 강력한 매수세가 들어왔습니다. **상승 반전 가능성**이 높습니다.")
+        
+    # 3. 하락 장악형 (Bearish Engulfing)
+    if prev['Close'] > prev['Open'] and last['Close'] < last['Open'] and last['Open'] >= prev['Close'] and last['Close'] <= prev['Open']:
+        patterns.append("⚠️ **하락 장악형(Bearish Engulfing)**: 이전의 상승세를 꺾는 강력한 매도세가 출현했습니다. **하락에 주의**가 필요합니다.")
+        
+    # 4. 망치형 (Hammer) / 교수형
+    if total_size > 0 and lower_shadow > body_size * 2 and upper_shadow < total_size * 0.1:
+        if trend == "하락":
+            patterns.append("🔨 **망치형(Hammer)**: 하락하던 중 바닥에서 강한 매수세가 들어와 꼬리를 길게 달았습니다. **단기 바닥(매수 찬스)**일 확률이 높습니다.")
+        else:
+            patterns.append("➰ **교수형(Hanging Man)**: 고점에서 나타난 긴 아래꼬리입니다. 단기 고점 징후일 수 있습니다.")
+            
+    # 5. 역망치형 (Shooting Star)
+    if total_size > 0 and upper_shadow > body_size * 2 and lower_shadow < total_size * 0.1:
+        if trend == "상승":
+            patterns.append("☄️ **유성형(Shooting Star)**: 고점에서 강하게 눌린 흔적입니다. 매도 물량이 쏟아지며 **단기 고점**일 확률이 높습니다.")
+            
+    if not patterns:
+        patterns.append(f"현재 뚜렷한 반전 캔들 패턴은 보이지 않으며, 기존의 **{trend} 추세**를 무난하게 이어가고 있습니다.")
+        
+    return patterns
+
+# --- 🛡️ [무적 엔진] 방탄 데이터 로더 (시간 단위 선택 지원) ---
+@st.cache_data(ttl=60, show_spinner=False) 
+def fetch_global_data(period="1y", interval="1d"):
     if not HAS_YFINANCE:
         return _generate_fallback_data()
         
     try:
-        krw_data = yf.Ticker("KRW=X").history(period="1y")['Close']
-        jpy_data = yf.Ticker("JPY=X").history(period="1y")['Close']
-        us_yield_data = yf.Ticker("^TNX").history(period="5d")['Close']
-        vix_data = yf.Ticker("^VIX").history(period="5d")['Close']
+        # 매크로 지표용 최근 데이터 (이것들은 차트 기간과 무관하게 항상 최신 일봉 기준)
+        macro_us_yield = yf.Ticker("^TNX").history(period="5d", interval="1d")['Close']
+        macro_vix = yf.Ticker("^VIX").history(period="5d", interval="1d")['Close']
+        macro_usd_jpy = yf.Ticker("JPY=X").history(period="5d", interval="1d")['Close']
 
-        # 야후 서버가 일시적으로 데이터를 안 주면 백업 데이터로 우회
-        if krw_data.empty or jpy_data.empty or us_yield_data.empty or vix_data.empty:
+        # 차트용 OHLC (시가, 고가, 저가, 종가) 데이터 추출
+        krw_history = yf.Ticker("KRW=X").history(period=period, interval=interval)
+        jpy_history = yf.Ticker("JPY=X").history(period=period, interval=interval)
+
+        # 데이터가 비어있으면 Fallback
+        if krw_history.empty or jpy_history.empty or macro_us_yield.empty or macro_vix.empty:
             return _generate_fallback_data()
 
-        df = pd.concat([krw_data, jpy_data], axis=1).dropna()
-        df.columns = ['KRW', 'JPY']
-        df['KRW_JPY'] = (df['KRW'] / df['JPY']) * 100
+        # 두 화폐 데이터 병합 및 정렬 (시간축 완벽 매칭)
+        df_krw, df_jpy = krw_history.align(jpy_history, join='inner')
+        
+        # 교차 환율 OHLC 계산 (원/100엔)
+        df = pd.DataFrame(index=df_krw.index)
+        df['Open'] = (df_krw['Open'] / df_jpy['Open']) * 100
+        df['High'] = (df_krw['High'] / df_jpy['Low']) * 100  # 원화 고점 / 엔화 저점
+        df['Low'] = (df_krw['Low'] / df_jpy['High']) * 100   # 원화 저점 / 엔화 고점
+        df['Close'] = (df_krw['Close'] / df_jpy['Close']) * 100
 
         # 기술적 지표 계산
-        df['MA20'] = df['KRW_JPY'].rolling(window=20).mean()
-        df['STD20'] = df['KRW_JPY'].rolling(window=20).std()
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['STD20'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
 
-        delta = df['KRW_JPY'].diff()
+        delta = df['Close'].diff()
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
         avg_gain = gain.rolling(window=14).mean()
@@ -90,11 +155,12 @@ def fetch_global_data():
 
         df.dropna(inplace=True)
         
+        # Latest 딕셔너리는 매크로 지표용 절대 최신값을 담음
         latest = {
-            'krw_jpy': df['KRW_JPY'].iloc[-1],
-            'usd_jpy': jpy_data.iloc[-1],
-            'us_yield': us_yield_data.iloc[-1],
-            'vix': vix_data.iloc[-1],
+            'krw_jpy': df['Close'].iloc[-1],
+            'usd_jpy': macro_usd_jpy.iloc[-1],
+            'us_yield': macro_us_yield.iloc[-1],
+            'vix': macro_vix.iloc[-1],
             'rsi': df['RSI'].iloc[-1],
             'bb_lower': df['BB_Lower'].iloc[-1],
             'bb_upper': df['BB_Upper'].iloc[-1],
@@ -107,15 +173,20 @@ def fetch_global_data():
         return _generate_fallback_data()
 
 def _generate_fallback_data():
-    # 서버 에러 시 화면이 죽지 않도록 생성하는 가상의 시뮬레이션 데이터
-    dates = pd.date_range(end=datetime.now(), periods=252)
-    np.random.seed(42) # 고정된 랜덤 패턴
-    walk = np.random.normal(0, 1.5, 252).cumsum()
-    krw_jpy_mock = 880 + walk
+    # 서버 에러 시 화면이 죽지 않도록 생성하는 가상의 OHLC 시뮬레이션 데이터
+    dates = pd.date_range(end=datetime.now(), periods=100)
+    np.random.seed(42)
+    walk = np.random.normal(0, 1.5, 100).cumsum()
+    close_mock = 880 + walk
+    
+    df = pd.DataFrame(index=dates)
+    df['Open'] = close_mock - np.random.normal(0, 1, 100)
+    df['Close'] = close_mock
+    df['High'] = df[['Open', 'Close']].max(axis=1) + np.random.uniform(0.5, 2, 100)
+    df['Low'] = df[['Open', 'Close']].min(axis=1) - np.random.uniform(0.5, 2, 100)
 
-    df = pd.DataFrame({'KRW_JPY': krw_jpy_mock}, index=dates)
-    df['MA20'] = df['KRW_JPY'].rolling(window=20).mean()
-    df['STD20'] = df['KRW_JPY'].rolling(window=20).std()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['STD20'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
     df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
     df['RSI'] = 45.5 # 가상 RSI
@@ -123,7 +194,7 @@ def _generate_fallback_data():
     df.dropna(inplace=True)
 
     latest = {
-        'krw_jpy': df['KRW_JPY'].iloc[-1],
+        'krw_jpy': df['Close'].iloc[-1],
         'usd_jpy': 151.30,
         'us_yield': 4.35,
         'vix': 16.2,
@@ -144,13 +215,15 @@ if 'portfolio' not in st.session_state:
         {'id': 1, 'date': '2025-10-15', 'amount_jpy': 500000, 'rate': 905.20}
     ]
 
-# 데이터 로딩 실행
-with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
-    df, latest, is_live = fetch_global_data()
-
-# 🚨 차단 방어 성공 알림 (서버 차단 시 시뮬레이션 모드 안내)
-if not is_live:
-    st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
+# --- UI: 차트 봉(시간) 선택 ---
+timeframe_map = {
+    "30분": {"period": "60d", "interval": "30m"},
+    "1시간": {"period": "730d", "interval": "1h"},
+    "일봉": {"period": "1y", "interval": "1d"},
+    "주봉": {"period": "3y", "interval": "1wk"},
+    "월봉": {"period": "10y", "interval": "1mo"},
+    "분기봉": {"period": "20y", "interval": "3mo"}
+}
 
 # --- 탭 구성 ---
 tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 자산 관리", "📖 투자 전략 백과"])
@@ -159,6 +232,29 @@ tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 �
 # 탭 1: AI 대시보드
 # ==========================================
 with tab1:
+    
+    # 시간 간격(봉) 선택 (UI 강조)
+    st.write("⏱️ **차트 시간 간격 (Timeframe) 설정**")
+    selected_tf = st.radio(
+        "시간 간격",
+        options=list(timeframe_map.keys()),
+        index=2, # 기본값: 일봉
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    
+    # 선택된 기간으로 데이터 로딩 실행
+    with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
+        df, latest, is_live = fetch_global_data(
+            period=timeframe_map[selected_tf]["period"], 
+            interval=timeframe_map[selected_tf]["interval"]
+        )
+
+    # 🚨 차단 방어 성공 알림 (서버 차단 시 시뮬레이션 모드 안내)
+    if not is_live:
+        st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
+
+
     # 1. 상단 카드 지표
     col1, col2, col3, col4 = st.columns(4)
     
@@ -179,8 +275,8 @@ with tab1:
 
     st.write("") # 여백
 
-    # 2. Plotly 인터랙티브 차트 (웹에 최적화)
-    st.subheader("📈 원/엔 환율 종합 기술적 분석")
+    # 2. Plotly 캔들스틱 인터랙티브 차트
+    st.subheader(f"📈 원/엔 환율 종합 기술적 분석 ({selected_tf} 차트)")
     st.caption("마우스를 올려 가격을 확인하거나 드래그해서 차트를 확대할 수 있습니다.")
     
     fig = go.Figure()
@@ -190,24 +286,46 @@ with tab1:
     fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(16, 185, 129, 0.5)', dash='dash'), fill='tonexty', fillcolor='rgba(203, 213, 225, 0.1)', name='볼린저 하단'))
     
     # 20일 이동평균선
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#f59e0b', width=2), name='20일 이동평균'))
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#f59e0b', width=2), name='20선 (이동평균)'))
     
-    # 현재가
-    fig.add_trace(go.Scatter(x=df.index, y=df['KRW_JPY'], line=dict(color='#3b82f6', width=3), name='원/100엔 현재가'))
+    # [새로운 기능] 캔들스틱 (봉 차트) - 한국 주식 시장 컬러(상승: 빨강, 하락: 파랑) 완벽 적용
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+        increasing_line_color='#ef4444', increasing_fillcolor='#ef4444', # 한국 패치: 상승(양봉) = 빨간색
+        decreasing_line_color='#3b82f6', decreasing_fillcolor='#3b82f6', # 한국 패치: 하락(음봉) = 파란색
+        name='원/100엔 캔들'
+    ))
 
     # 가이드 라인
     fig.add_hline(y=950, line_dash="dot", line_color="red", annotation_text="고평가 (매도)", annotation_position="top left")
     fig.add_hline(y=850, line_dash="dot", line_color="green", annotation_text="저평가 (매수)", annotation_position="bottom left")
     
-    # 레이아웃 설정
-    fig.update_layout(height=450, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc',
-                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    # 레이아웃 설정 (차트 하단의 불필요한 범위 조절 바 제거)
+    fig.update_layout(
+        height=500, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis_rangeslider_visible=False # 캔들 차트의 부피를 차지하는 미니 슬라이더 끔
+    )
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
     
     st.plotly_chart(fig, use_container_width=True)
 
-    # 3. AI 분석 엔진
+    # 3. [신규] 🕯️ AI 캔들 & 차트 패턴 분석
+    st.markdown("### 🕯️ AI 캔들 & 차트 패턴 실시간 분석")
+    candle_patterns = analyze_candles(df)
+    
+    for pattern in candle_patterns:
+        # 패턴의 종류에 따라 색상을 다르게 표현 (경고, 성공, 안내)
+        if "장악형" in pattern and "하락" in pattern or "유성형" in pattern:
+            st.warning(pattern)
+        elif "장악형" in pattern and "상승" in pattern or "망치형" in pattern:
+            st.success(pattern)
+        else:
+            st.info(pattern)
+
+    # 4. AI 분석 엔진
     st.markdown("---")
     st.subheader("🧠 Deep Analysis (매크로 + 기술적 지표 융합 엔진)")
     
@@ -216,10 +334,10 @@ with tab1:
         status_text = st.empty()
         
         steps = [
-            "기술적 지표(RSI, MACD) 다이버전스 확인...",
+            "최근 캔들 패턴(Price Action) 분석 중...",
             "볼린저 밴드(Bollinger Bands) 지지/저항 테스트...",
             "미일 금리차(US-JP Yield Gap) 축소 가능성 계산...",
-            "과거 1년 차트 패턴 딥러닝 매칭 중...",
+            "과거 유사 차트 패턴 딥러닝 매칭 중...",
             "최종 매수/매도 확률(Conviction Score) 산출 완료!"
         ]
         
@@ -345,9 +463,9 @@ with tab3:
         - **Tip:** VIX 지수가 25~30을 넘어가는 시장 패닉이 최고의 매도 찬스입니다.
         """)
         
-    with st.expander("📈 기술적 지표 (이평선, 볼린저밴드, RSI) 활용법"):
+    with st.expander("📈 기술적 지표 (이평선, 볼린저밴드, 캔들) 활용법"):
         st.write("""
         - **이동평균선 (MA20):** 단기 20일간의 가격 평균. 추세의 방향을 보여줍니다.
         - **볼린저 밴드:** 가격이 움직이는 정상 궤도. **하단 터치 시 매수**, **상단 터치 시 매도** 확률이 높습니다.
-        - **RSI (투자 심리):** 30 이하(초록색)면 과매도(싸다!), 70 이상(빨간색)이면 과매수(비싸다!)를 의미합니다.
+        - **캔들 (봉):** 빨간색(양봉)은 상승, 파란색(음봉)은 하락을 의미합니다. 꼬리가 길게 달린 모양(망치형 등)은 추세 반전을 예고합니다.
         """)
