@@ -300,7 +300,7 @@ with tab1:
 
     # 가이드 라인
     fig.add_hline(y=950, line_dash="dot", line_color="red", annotation_text="고평가 (매도)", annotation_position="top left")
-    fig.add_hline(y=850, line_dash="dot", line_color="green", annotation_text="저평가 (매수)", annotation_position="bottom left")
+    fig.add_hline(y=900, line_dash="dot", line_color="green", annotation_text="저평가 (매수)", annotation_position="bottom left")
     
     # 레이아웃 설정 (차트 하단의 불필요한 범위 조절 바 제거)
     fig.update_layout(
