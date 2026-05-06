@@ -4,16 +4,24 @@ import numpy as np
 import plotly.graph_objects as go
 import time
 from datetime import datetime
+import json
 
 # [필수] Streamlit 페이지 설정은 반드시 최상단에 위치해야 합니다.
 st.set_page_config(page_title="엔화 투자 마스터", page_icon="💴", layout="wide")
 
-# yfinance 임포트 (만약 설치 안 되어 있어도 앱이 뻗지 않도록 처리)
+# yfinance 및 GCP 임포트 (만약 설치 안 되어 있어도 앱이 뻗지 않도록 처리)
 try:
     import yfinance as yf
     HAS_YFINANCE = True
 except ImportError:
     HAS_YFINANCE = False
+
+try:
+    from google.cloud import firestore
+    from google.oauth2 import service_account
+    HAS_GCP = True
+except ImportError:
+    HAS_GCP = False
 
 # --- CSS로 디자인 다듬기 ---
 st.markdown("""
@@ -40,6 +48,54 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
+
+# --- ☁️ GCP Firestore 데이터베이스 연동 엔진 ---
+@st.cache_resource
+def get_db():
+    if HAS_GCP and "GCP_JSON" in st.secrets:
+        try:
+            # Streamlit Secrets에서 JSON 문자열을 읽어와 딕셔너리로 변환
+            key_dict = json.loads(st.secrets["GCP_JSON"])
+            creds = service_account.Credentials.from_service_account_info(key_dict)
+            db = firestore.Client(credentials=creds, project=key_dict["project_id"])
+            return db
+        except Exception as e:
+            st.sidebar.error(f"GCP 인증 에러: {e}")
+    return None
+
+def load_portfolio():
+    db = get_db()
+    if db is not None:
+        try:
+            trades = []
+            docs = db.collection('yen_portfolio').stream()
+            for doc in docs:
+                trades.append(doc.to_dict())
+            if trades:
+                return sorted(trades, key=lambda x: x['id'])
+            return [] # 빈 데이터베이스
+        except Exception as e:
+            st.sidebar.error(f"클라우드 로딩 에러: {e}")
+            
+    # GCP가 연결되지 않았을 때의 기본 데모 데이터
+    return [{'id': 1, 'date': '2025-10-15', 'type': 'buy', 'amount_jpy': 500000, 'rate': 905.20}]
+
+def add_trade_to_db(trade):
+    db = get_db()
+    if db is not None:
+        try:
+            # 문서 ID를 거래 ID로 지정하여 저장
+            db.collection('yen_portfolio').document(str(trade['id'])).set(trade)
+        except Exception as e:
+            st.sidebar.error(f"클라우드 저장 에러: {e}")
+
+def delete_trade_from_db(trade_id):
+    db = get_db()
+    if db is not None:
+        try:
+            db.collection('yen_portfolio').document(str(trade_id)).delete()
+        except Exception as e:
+            st.sidebar.error(f"클라우드 삭제 에러: {e}")
 
 # --- 지표별 의미 해석기 ---
 def get_krw_status(val):
@@ -80,26 +136,21 @@ def analyze_candles(df):
     
     patterns = []
     
-    # 1. 도지형(Doji)
     if total_size > 0 and body_size <= total_size * 0.1:
         patterns.append("🔹 **도지형(Doji) 출현**: 매수세와 매도세가 팽팽하게 맞서고 있습니다. 곧 현재의 추세가 크게 반전될 가능성이 있습니다.")
         
-    # 2. 상승 장악형 (Bullish Engulfing)
     if prev['Close'] < prev['Open'] and last['Close'] > last['Open'] and last['Open'] <= prev['Close'] and last['Close'] >= prev['Open']:
         patterns.append("🚀 **상승 장악형(Bullish Engulfing)**: 이전의 하락세를 완전히 뒤덮는 강력한 매수세가 들어왔습니다. **상승 반전 가능성**이 높습니다.")
         
-    # 3. 하락 장악형 (Bearish Engulfing)
     if prev['Close'] > prev['Open'] and last['Close'] < last['Open'] and last['Open'] >= prev['Close'] and last['Close'] <= prev['Open']:
         patterns.append("⚠️ **하락 장악형(Bearish Engulfing)**: 이전의 상승세를 꺾는 강력한 매도세가 출현했습니다. **하락에 주의**가 필요합니다.")
         
-    # 4. 망치형 (Hammer) / 교수형
     if total_size > 0 and lower_shadow > body_size * 2 and upper_shadow < total_size * 0.1:
         if trend == "하락":
             patterns.append("🔨 **망치형(Hammer)**: 하락하던 중 바닥에서 강한 매수세가 들어와 꼬리를 길게 달았습니다. **단기 바닥(매수 찬스)**일 확률이 높습니다.")
         else:
             patterns.append("➰ **교수형(Hanging Man)**: 고점에서 나타난 긴 아래꼬리입니다. 단기 고점 징후일 수 있습니다.")
             
-    # 5. 역망치형 (Shooting Star)
     if total_size > 0 and upper_shadow > body_size * 2 and lower_shadow < total_size * 0.1:
         if trend == "상승":
             patterns.append("☄️ **유성형(Shooting Star)**: 고점에서 강하게 눌린 흔적입니다. 매도 물량이 쏟아지며 **단기 고점**일 확률이 높습니다.")
@@ -109,37 +160,31 @@ def analyze_candles(df):
         
     return patterns
 
-# --- 🛡️ [무적 엔진] 방탄 데이터 로더 (시간 단위 선택 지원) ---
+# --- 🛡️ [무적 엔진] 방탄 데이터 로더 ---
 @st.cache_data(ttl=60, show_spinner=False) 
 def fetch_global_data(period="1y", interval="1d"):
     if not HAS_YFINANCE:
         return _generate_fallback_data()
         
     try:
-        # 매크로 지표용 최근 데이터 (이것들은 차트 기간과 무관하게 항상 최신 일봉 기준)
         macro_us_yield = yf.Ticker("^TNX").history(period="5d", interval="1d")['Close']
         macro_vix = yf.Ticker("^VIX").history(period="5d", interval="1d")['Close']
         macro_usd_jpy = yf.Ticker("JPY=X").history(period="5d", interval="1d")['Close']
 
-        # 차트용 OHLC (시가, 고가, 저가, 종가) 데이터 추출
         krw_history = yf.Ticker("KRW=X").history(period=period, interval=interval)
         jpy_history = yf.Ticker("JPY=X").history(period=period, interval=interval)
 
-        # 데이터가 비어있으면 Fallback
         if krw_history.empty or jpy_history.empty or macro_us_yield.empty or macro_vix.empty:
             return _generate_fallback_data()
 
-        # 두 화폐 데이터 병합 및 정렬 (시간축 완벽 매칭)
         df_krw, df_jpy = krw_history.align(jpy_history, join='inner')
         
-        # 교차 환율 OHLC 계산 (원/100엔)
         df = pd.DataFrame(index=df_krw.index)
         df['Open'] = (df_krw['Open'] / df_jpy['Open']) * 100
-        df['High'] = (df_krw['High'] / df_jpy['Low']) * 100  # 원화 고점 / 엔화 저점
-        df['Low'] = (df_krw['Low'] / df_jpy['High']) * 100   # 원화 저점 / 엔화 고점
+        df['High'] = (df_krw['High'] / df_jpy['Low']) * 100 
+        df['Low'] = (df_krw['Low'] / df_jpy['High']) * 100 
         df['Close'] = (df_krw['Close'] / df_jpy['Close']) * 100
 
-        # 기술적 지표 계산 (차트 경량화를 위해 불필요한 데이터 포인트가 너무 많으면 최적화)
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['STD20'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
@@ -155,7 +200,6 @@ def fetch_global_data(period="1y", interval="1d"):
 
         df.dropna(inplace=True)
         
-        # Latest 딕셔너리는 매크로 지표용 절대 최신값을 담음
         latest = {
             'krw_jpy': df['Close'].iloc[-1],
             'usd_jpy': macro_usd_jpy.iloc[-1],
@@ -166,14 +210,12 @@ def fetch_global_data(period="1y", interval="1d"):
             'bb_upper': df['BB_Upper'].iloc[-1],
             'ma20': df['MA20'].iloc[-1]
         }
-        return df, latest, True # True = 라이브 데이터 성공
+        return df, latest, True 
         
     except Exception as e:
-        # 서버 다운, IP 차단 등 어떠한 에러가 발생해도 프로그램이 죽지 않고 백업 실행
         return _generate_fallback_data()
 
 def _generate_fallback_data():
-    # 서버 에러 시 화면이 죽지 않도록 생성하는 가상의 OHLC 시뮬레이션 데이터
     dates = pd.date_range(end=datetime.now(), periods=100)
     np.random.seed(42)
     walk = np.random.normal(0, 1.5, 100).cumsum()
@@ -189,7 +231,7 @@ def _generate_fallback_data():
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
     df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
-    df['RSI'] = 45.5 # 가상 RSI
+    df['RSI'] = 45.5
 
     df.dropna(inplace=True)
 
@@ -203,20 +245,24 @@ def _generate_fallback_data():
         'bb_upper': df['BB_Upper'].iloc[-1],
         'ma20': df['MA20'].iloc[-1]
     }
-    return df, latest, False # False = 시뮬레이션 모드 작동
+    return df, latest, False
 
 # --- 앱 메인 화면 시작 ---
+
+# 클라우드 DB 연결 상태 표시기 (사이드바)
+with st.sidebar:
+    if get_db() is not None:
+        st.success("☁️ GCP 클라우드 DB 연동 완료 (데이터 영구 보존됨)")
+    else:
+        st.warning("⚠️ 현재 임시 메모리 모드입니다.\n\n새로고침 시 데이터가 날아갑니다. GCP 연동을 진행해주세요.")
+
 st.title("💴 Yen-Vestor Pro (실시간 웹 대시보드)")
 st.markdown("전 세계 금융 API와 연동된 **가장 완벽한 엔화 투자 AI 시뮬레이터**입니다.")
 
-# 포트폴리오 세션 초기화 (매수/매도 구분 추가)
+# 포트폴리오 세션 초기화 (클라우드에서 불러오기)
 if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = [
-        {'id': 1, 'date': '2025-10-15', 'type': 'buy', 'amount_jpy': 500000, 'rate': 905.20}
-    ]
+    st.session_state.portfolio = load_portfolio()
 
-# --- UI: 차트 봉(시간) 선택 ---
-# 브라우저 렌더링 부하(렉)를 방지하기 위해 period(조회 기간)를 매우 현실적이고 가볍게 최적화함
 timeframe_map = {
     "30분": {"period": "1mo", "interval": "30m"}, 
     "1시간": {"period": "3mo", "interval": "1h"},  
@@ -226,13 +272,9 @@ timeframe_map = {
     "분기봉": {"period": "20y", "interval": "3mo"}
 }
 
-# 데이터 로딩 실행
 with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
-    # 현재 선택된 탭과 무관하게 데이터는 공통으로 불러옵니다.
-    # 초기 로딩 시 기본값(일봉)으로 데이터 로드
     df, latest, is_live = fetch_global_data(period="1y", interval="1d")
 
-# 🚨 차단 방어 성공 알림 (서버 차단 시 시뮬레이션 모드 안내)
 if not is_live:
     st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
 
@@ -243,24 +285,20 @@ tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 �
 # 탭 1: AI 대시보드
 # ==========================================
 with tab1:
-    
-    # 시간 간격(봉) 선택 (UI 강조)
     st.write("⏱️ **차트 시간 간격 (Timeframe) 설정**")
     selected_tf = st.radio(
         "시간 간격",
         options=list(timeframe_map.keys()),
-        index=2, # 기본값: 일봉
+        index=2,
         horizontal=True,
         label_visibility="collapsed"
     )
     
-    # 사용자가 라디오 버튼을 바꾸면 해당 기간으로 다시 로드
     df_chart, latest_chart, _ = fetch_global_data(
         period=timeframe_map[selected_tf]["period"], 
         interval=timeframe_map[selected_tf]["interval"]
     )
 
-    # 1. 상단 카드 지표
     col1, col2, col3, col4 = st.columns(4)
     
     def render_metric_card(col, title, value, unit, status_fn):
@@ -278,22 +316,18 @@ with tab1:
     render_metric_card(col3, "🇺🇸 미 국채 10년물", latest_chart['us_yield'], "%", get_yield_status)
     render_metric_card(col4, "📉 VIX 공포지수", latest_chart['vix'], "", get_vix_status)
 
-    st.write("") # 여백
+    st.write("")
 
-    # 2. Plotly 캔들스틱 인터랙티브 차트
     st.subheader(f"📈 원/엔 환율 종합 기술적 분석 ({selected_tf} 차트)")
     st.caption("마우스를 올려 가격을 확인하거나 드래그해서 차트를 확대할 수 있습니다.")
     
     fig = go.Figure()
     
-    # 볼린저 밴드 영역
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.5)', dash='dash'), name='볼린저 상단'))
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Lower'], line=dict(color='rgba(16, 185, 129, 0.5)', dash='dash'), fill='tonexty', fillcolor='rgba(203, 213, 225, 0.1)', name='볼린저 하단'))
     
-    # 20일 이동평균선
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], line=dict(color='#f59e0b', width=2), name='20선 (이동평균)'))
     
-    # [새로운 기능] 캔들스틱 (봉 차트) - 한국 주식 시장 컬러(상승: 빨강, 하락: 파랑) 완벽 적용
     fig.add_trace(go.Candlestick(
         x=df_chart.index,
         open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'],
@@ -302,11 +336,9 @@ with tab1:
         name='원/100엔 캔들'
     ))
 
-    # 가이드 라인
     fig.add_hline(y=950, line_dash="dot", line_color="red", annotation_text="고평가 (매도)", annotation_position="top left")
     fig.add_hline(y=900, line_dash="dot", line_color="green", annotation_text="저평가 (매수)", annotation_position="bottom left")
     
-    # 레이아웃 설정 (차트 하단의 불필요한 범위 조절 바 제거)
     fig.update_layout(
         height=500, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -317,7 +349,6 @@ with tab1:
     
     st.plotly_chart(fig, use_container_width=True)
 
-    # 3. [신규] 🕯️ AI 캔들 & 차트 패턴 분석
     st.markdown("### 🕯️ AI 캔들 & 차트 패턴 실시간 분석")
     candle_patterns = analyze_candles(df_chart)
     
@@ -329,7 +360,6 @@ with tab1:
         else:
             st.info(pattern)
 
-    # 4. AI 분석 엔진
     st.markdown("---")
     st.subheader("🧠 Deep Analysis (매크로 + 기술적 지표 융합 엔진)")
     
@@ -352,7 +382,6 @@ with tab1:
                 
         status_text.text("[100%] 분석 완료!")
         
-        # AI 점수 계산 로직
         score = 50
         reasons = []
         cur_price = latest_chart['krw_jpy']
@@ -392,15 +421,13 @@ with tab1:
 with tab2:
     st.subheader("📊 종합 자산 및 수익률 대시보드")
     
-    # 1. 장부(Ledger) 계산 로직 - 매수/매도 실시간 처리
-    current_jpy = 0          # 현재 쥐고 있는 원금(엔화)
-    current_principal = 0    # 현재 쥐고 있는 원금(원화)
-    realized_profit = 0      # 매도를 통해 이미 지갑에 확정된 수익
-    total_invested_max = 0   # 수익률 계산을 위한 누적 투입 원금의 총합
+    current_jpy = 0
+    current_principal = 0
+    realized_profit = 0
+    total_invested_max = 0
     
     portfolio_df_data = []
     
-    # 거래 내역을 시간순(ID순)으로 정렬하여 하나씩 장부를 작성합니다.
     for t in sorted(st.session_state.portfolio, key=lambda x: x['id']):
         t_type = t.get('type', 'buy')
         amt = t['amount_jpy']
@@ -421,17 +448,13 @@ with tab2:
                 '거래금액(₩)': f"₩ {krw_amt:,.0f}"
             })
         else: 
-            # 매도 시: 매도 직전의 '평균 단가'를 계산하여 실현 손익을 구합니다.
             avg_cost = current_principal / current_jpy if current_jpy > 0 else 0
-            # 실현 수익 = 매도해서 받은 원화 - (매도한 엔화 * 평단가)
             trade_profit = krw_amt - (amt * avg_cost)
             realized_profit += trade_profit
             
-            # 남은 자산 차감
             current_jpy -= amt
             current_principal -= (amt * avg_cost)
             
-            # 혹시 모를 소수점 이하 오차 교정
             if current_jpy <= 0.01:
                 current_jpy = 0
                 current_principal = 0
@@ -445,20 +468,15 @@ with tab2:
                 '거래금액(₩)': f"₩ {krw_amt:,.0f}"
             })
             
-    # 2. 결과 연산
     avg_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
     current_krw_value = current_jpy * (latest['krw_jpy'] / 100)
     
-    # 평가 손익 (안 팔고 쥐고 있는 것의 현재 가치 차이)
     unrealized_profit = current_krw_value - current_principal
     unrealized_profit_pct = (unrealized_profit / current_principal * 100) if current_principal > 0 else 0
     
-    # 최종 누적 총 수익률 (실현 손익 + 평가 손익)
     total_profit = unrealized_profit + realized_profit
     total_profit_pct = (total_profit / total_invested_max * 100) if total_invested_max > 0 else 0
 
-    # --- UI 출력: 종합 대시보드 ---
-    # 총 누적 수익률 하이라이트 박스
     st.markdown(f"""
     <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_profit >= 0 else '#ef4444'}; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px;">
         <p style="color: #94a3b8; font-size: 16px; font-weight: bold; margin-bottom: 5px;">🔥 기간 누적 최종 수익 (평가 손익 + 이미 확정된 실현 손익)</p>
@@ -469,7 +487,6 @@ with tab2:
     </div>
     """, unsafe_allow_html=True)
 
-    # 4분할 세부 지표
     p_col1, p_col2, p_col3, p_col4 = st.columns(4)
     p_col1.metric("총 보유 엔화 잔고", f"¥ {current_jpy:,.0f}")
     p_col2.metric("내 평균 매수 단가", f"{avg_rate:.2f} 원")
@@ -479,7 +496,6 @@ with tab2:
     st.markdown("---")
     st.subheader("📝 거래 내역 추가 및 관리")
     
-    # 거래 추가 폼 (매수/매도 라디오 버튼 추가)
     with st.form("add_trade_form", clear_on_submit=True):
         f_col1, f_col2, f_col3, f_col4 = st.columns([1.5, 2, 2, 1.5])
         
@@ -491,32 +507,39 @@ with tab2:
         if submitted and amt_input > 0 and rate_input > 0:
             is_buy = "매수" in trade_type
             
-            # 매도 시 보유 잔고보다 많은 금액을 파는지 검증
             if not is_buy and amt_input > current_jpy:
                 st.error(f"보유 잔고(¥ {current_jpy:,.0f})를 초과하여 매도할 수 없습니다!")
             else:
-                new_id = max([t['id'] for t in st.session_state.portfolio] + [0]) + 1
-                st.session_state.portfolio.append({
+                new_id = int(time.time() * 1000) # 고유 ID 생성 (밀리초)
+                new_trade = {
                     'id': new_id,
                     'date': datetime.now().strftime("%Y-%m-%d"),
                     'type': 'buy' if is_buy else 'sell',
                     'amount_jpy': amt_input,
                     'rate': rate_input
-                })
-                st.rerun() # 화면 새로고침
+                }
+                st.session_state.portfolio.append(new_trade)
+                
+                # ☁️ 클라우드 DB에 개별 기록 즉시 추가
+                add_trade_to_db(new_trade)
+                st.rerun()
 
-    # 거래 내역 테이블 출력
     if portfolio_df_data:
         df_port = pd.DataFrame(portfolio_df_data)
         st.dataframe(df_port, use_container_width=True, hide_index=True)
         
-        # 개별 기록 삭제 기능 (깔끔하게 좌우 분할 정렬)
-        st.markdown("#### 🗑️ 기록 삭제")
-        del_col1, del_col2, _ = st.columns([2, 1, 3])
+        st.markdown("#### 🗑️ 기록 삭제 및 백업")
+        del_col1, del_col2, del_col3 = st.columns([2, 1, 1])
         del_id = del_col1.number_input("삭제할 거래 ID", min_value=0, step=1, label_visibility="collapsed")
+        
         if del_col2.button("선택 기록 삭제", use_container_width=True):
             st.session_state.portfolio = [t for t in st.session_state.portfolio if t['id'] != del_id]
+            # ☁️ 클라우드 DB에서도 해당 기록 즉시 삭제
+            delete_trade_from_db(del_id)
             st.rerun()
+            
+        csv_data = df_port.to_csv(index=False).encode('utf-8-sig')
+        del_col3.download_button("💾 엑셀(CSV) 백업", data=csv_data, file_name="yen_portfolio.csv", mime="text/csv", use_container_width=True)
     else:
         st.info("아직 등록된 거래 내역이 없습니다.")
 
