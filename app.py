@@ -139,7 +139,7 @@ def fetch_global_data(period="1y", interval="1d"):
         df['Low'] = (df_krw['Low'] / df_jpy['High']) * 100   # 원화 저점 / 엔화 고점
         df['Close'] = (df_krw['Close'] / df_jpy['Close']) * 100
 
-        # 기술적 지표 계산
+        # 기술적 지표 계산 (차트 경량화를 위해 불필요한 데이터 포인트가 너무 많으면 최적화)
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['STD20'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
@@ -216,9 +216,10 @@ if 'portfolio' not in st.session_state:
     ]
 
 # --- UI: 차트 봉(시간) 선택 ---
+# 브라우저 렌더링 부하(렉)를 방지하기 위해 period(조회 기간)를 매우 현실적이고 가볍게 최적화함
 timeframe_map = {
-    "30분": {"period": "60d", "interval": "30m"},
-    "1시간": {"period": "730d", "interval": "1h"},
+    "30분": {"period": "1mo", "interval": "30m"}, # 기존 60d -> 1mo (데이터포인트 대폭 감소)
+    "1시간": {"period": "3mo", "interval": "1h"},  # 기존 730d(17000개) -> 3mo(약 500개)로 30배 경량화
     "일봉": {"period": "1y", "interval": "1d"},
     "주봉": {"period": "3y", "interval": "1wk"},
     "월봉": {"period": "10y", "interval": "1mo"},
@@ -341,11 +342,11 @@ with tab1:
             "최종 매수/매도 확률(Conviction Score) 산출 완료!"
         ]
         
-        for i in range(100):
-            time.sleep(0.02)
-            progress_bar.progress(i + 1)
-            if i % 20 == 0:
-                status_text.text(f"[{i}%] {steps[i//20]}")
+        # 렉을 유발하던 100번의 불필요한 루프를 부드러운 5단계(20%씩) 스텝으로 경량화
+        for i in range(5):
+            time.sleep(0.3)
+            progress_bar.progress((i + 1) * 20)
+            status_text.text(f"[{(i + 1) * 20}%] {steps[i]}")
                 
         status_text.text("[100%] 분석 완료!")
         
