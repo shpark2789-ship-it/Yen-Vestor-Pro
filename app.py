@@ -54,7 +54,6 @@ st.markdown("""
 def get_db():
     if HAS_GCP and "GCP_JSON" in st.secrets:
         try:
-            # Streamlit Secrets에서 JSON 문자열을 읽어와 딕셔너리로 변환
             key_dict = json.loads(st.secrets["GCP_JSON"])
             creds = service_account.Credentials.from_service_account_info(key_dict)
             db = firestore.Client(credentials=creds, project=key_dict["project_id"])
@@ -73,18 +72,15 @@ def load_portfolio():
                 trades.append(doc.to_dict())
             if trades:
                 return sorted(trades, key=lambda x: x['id'])
-            return [] # 빈 데이터베이스
+            return []
         except Exception as e:
             st.sidebar.error(f"클라우드 로딩 에러: {e}")
-            
-    # GCP가 연결되지 않았을 때의 기본 데모 데이터
     return [{'id': 1, 'date': '2025-10-15', 'type': 'buy', 'amount_jpy': 500000, 'rate': 905.20}]
 
 def add_trade_to_db(trade):
     db = get_db()
     if db is not None:
         try:
-            # 문서 ID를 거래 ID로 지정하여 저장
             db.collection('yen_portfolio').document(str(trade['id'])).set(trade)
         except Exception as e:
             st.sidebar.error(f"클라우드 저장 에러: {e}")
@@ -122,386 +118,216 @@ def get_vix_status(val):
 # --- 🕯️ AI 캔들 및 패턴 분석 엔진 ---
 def analyze_candles(df):
     if len(df) < 3: return ["데이터가 부족하여 캔들 패턴을 분석할 수 없습니다."]
-    
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    
     body_size = abs(last['Close'] - last['Open'])
     total_size = last['High'] - last['Low']
     upper_shadow = last['High'] - max(last['Open'], last['Close'])
     lower_shadow = min(last['Open'], last['Close']) - last['Low']
-    
-    # 단기 추세 확인 (20일선 기준)
     trend = "상승" if df['MA20'].iloc[-1] > df['MA20'].iloc[-2] else "하락"
-    
     patterns = []
-    
     if total_size > 0 and body_size <= total_size * 0.1:
-        patterns.append("🔹 **도지형(Doji) 출현**: 매수세와 매도세가 팽팽하게 맞서고 있습니다. 곧 현재의 추세가 크게 반전될 가능성이 있습니다.")
-        
+        patterns.append("🔹 **도지형(Doji) 출현**: 매수세와 매도세가 팽팽하게 맞서고 있습니다. 곧 추세가 크게 반전될 가능성이 있습니다.")
     if prev['Close'] < prev['Open'] and last['Close'] > last['Open'] and last['Open'] <= prev['Close'] and last['Close'] >= prev['Open']:
-        patterns.append("🚀 **상승 장악형(Bullish Engulfing)**: 이전의 하락세를 완전히 뒤덮는 강력한 매수세가 들어왔습니다. **상승 반전 가능성**이 높습니다.")
-        
+        patterns.append("🚀 **상승 장악형(Bullish Engulfing)**: 강력한 매수세가 들어왔습니다. **상승 반전 가능성**이 높습니다.")
     if prev['Close'] > prev['Open'] and last['Close'] < last['Open'] and last['Open'] >= prev['Close'] and last['Close'] <= prev['Open']:
-        patterns.append("⚠️ **하락 장악형(Bearish Engulfing)**: 이전의 상승세를 꺾는 강력한 매도세가 출현했습니다. **하락에 주의**가 필요합니다.")
-        
+        patterns.append("⚠️ **하락 장악형(Bearish Engulfing)**: 강력한 매도세가 출현했습니다. **하락에 주의**하세요.")
     if total_size > 0 and lower_shadow > body_size * 2 and upper_shadow < total_size * 0.1:
-        if trend == "하락":
-            patterns.append("🔨 **망치형(Hammer)**: 하락하던 중 바닥에서 강한 매수세가 들어와 꼬리를 길게 달았습니다. **단기 바닥(매수 찬스)**일 확률이 높습니다.")
-        else:
-            patterns.append("➰ **교수형(Hanging Man)**: 고점에서 나타난 긴 아래꼬리입니다. 단기 고점 징후일 수 있습니다.")
-            
-    if total_size > 0 and upper_shadow > body_size * 2 and lower_shadow < total_size * 0.1:
-        if trend == "상승":
-            patterns.append("☄️ **유성형(Shooting Star)**: 고점에서 강하게 눌린 흔적입니다. 매도 물량이 쏟아지며 **단기 고점**일 확률이 높습니다.")
-            
+        if trend == "하락": patterns.append("🔨 **망치형(Hammer)**: 하락 중 강한 매수세 유입. **단기 바닥**일 확률이 높습니다.")
+        else: patterns.append("➰ **교수형(Hanging Man)**: 고점에서 나타난 긴 아래꼬리. 단기 고점 징후일 수 있습니다.")
     if not patterns:
-        patterns.append(f"현재 뚜렷한 반전 캔들 패턴은 보이지 않으며, 기존의 **{trend} 추세**를 무난하게 이어가고 있습니다.")
-        
+        patterns.append(f"현재 뚜렷한 반전 패턴은 보이지 않으며, 기존의 **{trend} 추세**를 이어가고 있습니다.")
     return patterns
 
-# --- 🛡️ [무적 엔진] 방탄 데이터 로더 ---
+# --- 🛡️ 방탄 데이터 로더 ---
 @st.cache_data(ttl=60, show_spinner=False) 
 def fetch_global_data(period="1y", interval="1d"):
-    if not HAS_YFINANCE:
-        return _generate_fallback_data()
-        
+    if not HAS_YFINANCE: return _generate_fallback_data()
     try:
         macro_us_yield = yf.Ticker("^TNX").history(period="5d", interval="1d")['Close']
         macro_vix = yf.Ticker("^VIX").history(period="5d", interval="1d")['Close']
         macro_usd_jpy = yf.Ticker("JPY=X").history(period="5d", interval="1d")['Close']
-
         krw_history = yf.Ticker("KRW=X").history(period=period, interval=interval)
         jpy_history = yf.Ticker("JPY=X").history(period=period, interval=interval)
-
-        if krw_history.empty or jpy_history.empty or macro_us_yield.empty or macro_vix.empty:
-            return _generate_fallback_data()
-
+        if krw_history.empty or jpy_history.empty or macro_us_yield.empty: return _generate_fallback_data()
         df_krw, df_jpy = krw_history.align(jpy_history, join='inner')
-        
         df = pd.DataFrame(index=df_krw.index)
         df['Open'] = (df_krw['Open'] / df_jpy['Open']) * 100
         df['High'] = (df_krw['High'] / df_jpy['Low']) * 100 
         df['Low'] = (df_krw['Low'] / df_jpy['High']) * 100 
         df['Close'] = (df_krw['Close'] / df_jpy['Close']) * 100
-
         df['MA20'] = df['Close'].rolling(window=20).mean()
         df['STD20'] = df['Close'].rolling(window=20).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
-
         delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0)
-        loss = -delta.where(delta < 0, 0)
-        avg_gain = gain.rolling(window=14).mean()
-        avg_loss = loss.rolling(window=14).mean()
-        rs = avg_gain / avg_loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-
+        gain = delta.where(delta > 0, 0); loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean(); avg_loss = loss.rolling(window=14).mean()
+        df['RSI'] = 100 - (100 / (1 + (avg_gain / avg_loss)))
         df.dropna(inplace=True)
-        
         latest = {
-            'krw_jpy': df['Close'].iloc[-1],
-            'usd_jpy': macro_usd_jpy.iloc[-1],
-            'us_yield': macro_us_yield.iloc[-1],
-            'vix': macro_vix.iloc[-1],
-            'rsi': df['RSI'].iloc[-1],
-            'bb_lower': df['BB_Lower'].iloc[-1],
-            'bb_upper': df['BB_Upper'].iloc[-1],
-            'ma20': df['MA20'].iloc[-1]
+            'krw_jpy': df['Close'].iloc[-1], 'usd_jpy': macro_usd_jpy.iloc[-1],
+            'us_yield': macro_us_yield.iloc[-1], 'vix': macro_vix.iloc[-1],
+            'rsi': df['RSI'].iloc[-1], 'bb_lower': df['BB_Lower'].iloc[-1],
+            'bb_upper': df['BB_Upper'].iloc[-1], 'ma20': df['MA20'].iloc[-1]
         }
         return df, latest, True 
-        
-    except Exception as e:
-        return _generate_fallback_data()
+    except: return _generate_fallback_data()
 
 def _generate_fallback_data():
     dates = pd.date_range(end=datetime.now(), periods=100)
-    np.random.seed(42)
-    walk = np.random.normal(0, 1.5, 100).cumsum()
-    close_mock = 880 + walk
-    
-    df = pd.DataFrame(index=dates)
-    df['Open'] = close_mock - np.random.normal(0, 1, 100)
-    df['Close'] = close_mock
-    df['High'] = df[['Open', 'Close']].max(axis=1) + np.random.uniform(0.5, 2, 100)
-    df['Low'] = df[['Open', 'Close']].min(axis=1) - np.random.uniform(0.5, 2, 100)
-
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['STD20'] = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
-    df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
-    df['RSI'] = 45.5
-
-    df.dropna(inplace=True)
-
-    latest = {
-        'krw_jpy': df['Close'].iloc[-1],
-        'usd_jpy': 151.30,
-        'us_yield': 4.35,
-        'vix': 16.2,
-        'rsi': 45.5,
-        'bb_lower': df['BB_Lower'].iloc[-1],
-        'bb_upper': df['BB_Upper'].iloc[-1],
-        'ma20': df['MA20'].iloc[-1]
-    }
+    np.random.seed(42); walk = np.random.normal(0, 1.5, 100).cumsum()
+    df = pd.DataFrame({'Close': 880 + walk}, index=dates)
+    df['Open'] = df['Close'] - 2; df['High'] = df['Close'] + 2; df['Low'] = df['Open'] - 2
+    df['MA20'] = df['Close'].rolling(20).mean(); df['BB_Upper'] = df['MA20'] + 10; df['BB_Lower'] = df['MA20'] - 10
+    df['RSI'] = 50; df.dropna(inplace=True)
+    latest = { 'krw_jpy': 885.0, 'usd_jpy': 150.0, 'us_yield': 4.3, 'vix': 15.0, 'rsi': 50, 'bb_lower': 870, 'bb_upper': 900, 'ma20': 885 }
     return df, latest, False
 
-# --- 앱 메인 화면 시작 ---
-
-# 클라우드 DB 연결 상태 표시기 (사이드바)
+# --- 메인 화면 시작 ---
 with st.sidebar:
-    if get_db() is not None:
-        st.success("☁️ GCP 클라우드 DB 연동 완료 (데이터 영구 보존됨)")
-    else:
-        st.warning("⚠️ 현재 임시 메모리 모드입니다.\n\n새로고침 시 데이터가 날아갑니다. GCP 연동을 진행해주세요.")
+    if get_db() is not None: st.success("☁️ GCP 클라우드 DB 연동 완료")
+    else: st.warning("⚠️ 임시 메모리 모드 (GCP 연동 필요)")
 
 st.title("💴 Yen-Vestor Pro (실시간 웹 대시보드)")
 st.markdown("전 세계 금융 API와 연동된 **가장 완벽한 엔화 투자 AI 시뮬레이터**입니다.")
 
-# 포트폴리오 세션 초기화 (클라우드에서 불러오기)
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = load_portfolio()
 
 timeframe_map = {
-    "30분": {"period": "1mo", "interval": "30m"}, 
-    "1시간": {"period": "3mo", "interval": "1h"},  
-    "일봉": {"period": "1y", "interval": "1d"},
-    "주봉": {"period": "3y", "interval": "1wk"},
-    "월봉": {"period": "10y", "interval": "1mo"},
-    "분기봉": {"period": "20y", "interval": "3mo"}
+    "30분": {"period": "1mo", "interval": "30m"}, "1시간": {"period": "3mo", "interval": "1h"},
+    "일봉": {"period": "1y", "interval": "1d"}, "주봉": {"period": "3y", "interval": "1wk"},
+    "월봉": {"period": "10y", "interval": "1mo"}, "분기봉": {"period": "20y", "interval": "3mo"}
 }
 
-with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
-    df, latest, is_live = fetch_global_data(period="1y", interval="1d")
+with st.spinner("금융 데이터를 동기화 중입니다..."):
+    df, latest, is_live = fetch_global_data()
 
-if not is_live:
-    st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
-
-# --- 탭 구성 ---
-tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 자산 관리", "📖 투자 전략 백과"])
+tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드", "💼 내 자산 관리", "📖 투자 전략"])
 
 # ==========================================
 # 탭 1: AI 대시보드
 # ==========================================
 with tab1:
-    st.write("⏱️ **차트 시간 간격 (Timeframe) 설정**")
-    selected_tf = st.radio(
-        "시간 간격",
-        options=list(timeframe_map.keys()),
-        index=2,
-        horizontal=True,
-        label_visibility="collapsed"
-    )
-    
-    df_chart, latest_chart, _ = fetch_global_data(
-        period=timeframe_map[selected_tf]["period"], 
-        interval=timeframe_map[selected_tf]["interval"]
-    )
+    st.write("⏱️ **차트 시간 간격 설정**")
+    selected_tf = st.radio("tf", options=list(timeframe_map.keys()), index=2, horizontal=True, label_visibility="collapsed")
+    df_chart, latest_chart, _ = fetch_global_data(period=timeframe_map[selected_tf]["period"], interval=timeframe_map[selected_tf]["interval"])
 
     col1, col2, col3, col4 = st.columns(4)
-    
-    def render_metric_card(col, title, value, unit, status_fn):
+    def r_card(col, title, value, unit, status_fn):
         txt, color = status_fn(value)
-        col.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">{title}</div>
-            <div class="metric-value">{value:.2f}{unit}</div>
-            <div class="metric-status" style="color: {color};">{txt}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        col.markdown(f'<div class="metric-card"><div class="metric-title">{title}</div><div class="metric-value">{value:.2f}{unit}</div><div class="metric-status" style="color: {color};">{txt}</div></div>', unsafe_allow_html=True)
+    r_card(col1, "💰 현재 환율(원/100엔)", latest_chart['krw_jpy'], "원", get_krw_status)
+    r_card(col2, "💵 달러/엔 환율", latest_chart['usd_jpy'], "엔", get_usd_status)
+    r_card(col3, "🇺🇸 미 국채 10년물", latest_chart['us_yield'], "%", get_yield_status)
+    r_card(col4, "📉 VIX 공포지수", latest_chart['vix'], "", get_vix_status)
 
-    render_metric_card(col1, "💰 현재 환율(원/100엔)", latest_chart['krw_jpy'], "원", get_krw_status)
-    render_metric_card(col2, "💵 달러/엔 환율", latest_chart['usd_jpy'], "엔", get_usd_status)
-    render_metric_card(col3, "🇺🇸 미 국채 10년물", latest_chart['us_yield'], "%", get_yield_status)
-    render_metric_card(col4, "📉 VIX 공포지수", latest_chart['vix'], "", get_vix_status)
-
-    st.write("")
-
-    st.subheader(f"📈 원/엔 환율 종합 기술적 분석 ({selected_tf} 차트)")
-    st.caption("마우스를 올려 가격을 확인하거나 드래그해서 차트를 확대할 수 있습니다.")
-    
     fig = go.Figure()
-    
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.5)', dash='dash'), name='볼린저 상단'))
     fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Lower'], line=dict(color='rgba(16, 185, 129, 0.5)', dash='dash'), fill='tonexty', fillcolor='rgba(203, 213, 225, 0.1)', name='볼린저 하단'))
-    
-    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], line=dict(color='#f59e0b', width=2), name='20선 (이동평균)'))
-    
-    fig.add_trace(go.Candlestick(
-        x=df_chart.index,
-        open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'],
-        increasing_line_color='#ef4444', increasing_fillcolor='#ef4444', 
-        decreasing_line_color='#3b82f6', decreasing_fillcolor='#3b82f6', 
-        name='원/100엔 캔들'
-    ))
-
-    fig.add_hline(y=950, line_dash="dot", line_color="red", annotation_text="고평가 (매도)", annotation_position="top left")
-    fig.add_hline(y=900, line_dash="dot", line_color="green", annotation_text="저평가 (매수)", annotation_position="bottom left")
-    
-    fig.update_layout(
-        height=500, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc',
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_rangeslider_visible=False 
-    )
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
-    
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], line=dict(color='#f59e0b', width=2), name='20선'))
+    fig.add_trace(go.Candlestick(x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], increasing_line_color='#ef4444', increasing_fillcolor='#ef4444', decreasing_line_color='#3b82f6', decreasing_fillcolor='#3b82f6', name='캔들'))
+    fig.add_hline(y=950, line_dash="dot", line_color="red", annotation_text="고평가 (매도)")
+    fig.add_hline(y=900, line_dash="dot", line_color="green", annotation_text="저평가 (매수)")
+    fig.update_layout(height=500, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc', xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("### 🕯️ AI 캔들 & 차트 패턴 실시간 분석")
-    candle_patterns = analyze_candles(df_chart)
-    
-    for pattern in candle_patterns:
-        if "장악형" in pattern and "하락" in pattern or "유성형" in pattern:
-            st.warning(pattern)
-        elif "장악형" in pattern and "상승" in pattern or "망치형" in pattern:
-            st.success(pattern)
-        else:
-            st.info(pattern)
-
-    st.markdown("---")
-    st.subheader("🧠 Deep Analysis (매크로 + 기술적 지표 융합 엔진)")
-    
-    if st.button("▶ 현재 데이터 기반 AI 시뮬레이션 가동", type="primary", use_container_width=True):
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        steps = [
-            "최근 캔들 패턴(Price Action) 분석 중...",
-            "볼린저 밴드(Bollinger Bands) 지지/저항 테스트...",
-            "미일 금리차(US-JP Yield Gap) 축소 가능성 계산...",
-            "과거 유사 차트 패턴 딥러닝 매칭 중...",
-            "최종 매수/매도 확률(Conviction Score) 산출 완료!"
-        ]
-        
-        for i in range(5):
-            time.sleep(0.3)
-            progress_bar.progress((i + 1) * 20)
-            status_text.text(f"[{(i + 1) * 20}%] {steps[i]}")
-                
-        status_text.text("[100%] 분석 완료!")
-        
-        score = 50
-        reasons = []
-        cur_price = latest_chart['krw_jpy']
-
-        if latest_chart['rsi'] <= 30: score += 20; reasons.append(f"🟣 RSI {latest_chart['rsi']}% (과매도): 시장의 투매가 멈추고 기술적 반등 임박.")
-        elif latest_chart['rsi'] >= 70: score -= 20; reasons.append(f"🟣 RSI {latest_chart['rsi']}% (과매수): 단기 과열 상태. 조정 예상.")
-            
-        if cur_price <= latest_chart['bb_lower'] * 1.01: score += 15; reasons.append("☁️ 볼린저 밴드 하단 터치: 튕겨오를 확률이 높은 저점.")
-        elif cur_price >= latest_chart['bb_upper'] * 0.99: score -= 15; reasons.append("☁️ 볼린저 밴드 상단 터치: 저항선 부딪힘. 하락 가능성.")
-            
-        if cur_price > latest_chart['ma20']: score += 5; reasons.append("🟡 이동평균선 상회: 단기 추세가 우상향을 타고 있음.")
-        else: score -= 5; reasons.append("🟡 이동평균선 하회: 단기 추세 꺾임.")
-
-        if latest_chart['usd_jpy'] > 150: score += 10; reasons.append("🌎 달러/엔 150엔 돌파: BOJ의 시장 개입 가능성 상승 (엔화 강세 압력).")
-        if latest_chart['us_yield'] > 4.5: score -= 10; reasons.append("🌎 미 국채 10년물 강세: 글로벌 자금이 미국으로 몰려 엔화 약세 유지.")
-        elif latest_chart['us_yield'] < 4.0: score += 15; reasons.append("🌎 미 국채 금리 하락: 글로벌 자금이 일본으로 돌아갈 환경 조성.")
-        if latest_chart['vix'] > 25: score += 15; reasons.append("🚨 VIX 공포지수 급등: 위기로 인한 안전자산(엔화) 단기 쏠림 현상.")
-
-        score = max(0, min(100, int(score)))
-
-        action = 'HOLD (관망)'
-        color = 'gray'
-        if score >= 80: action = 'STRONG BUY (강력 매수)'; color = 'green'
-        elif score >= 60: action = 'BUY (분할 매수)'; color = 'blue'
-        elif score <= 20: action = 'STRONG SELL (전량 매도)'; color = 'red'
-        elif score <= 40: action = 'SELL (수익 실현)'; color = 'orange'
-
-        st.markdown(f"### 🤖 AI 통합 최종 판단: :{color}[{action}]")
-        st.markdown(f"**■ 매수 확신도 (Score):** {score} / 100")
-        
-        for i, r in enumerate(reasons, 1):
-            st.success(f"{i}. {r}")
+    st.markdown("### 🕯️ AI 캔들 분석")
+    for p in analyze_candles(df_chart): st.info(p)
 
 # ==========================================
-# 탭 2: 내 자산 관리 (성과 분석 및 기간별 수익률)
+# 탭 2: 내 자산 관리 (성과 분석 및 수정 완료)
 # ==========================================
 with tab2:
-    st.subheader("📊 투자 성과 및 수익률 정밀 분석")
+    st.subheader("📊 투자 성과 및 수익률 분석")
     
-    # 1. 누적 장부 계산 로직
-    current_jpy = 0          # 보유 수량
-    current_principal = 0    # 보유 수량에 대한 원금
-    realized_profit = 0      # 실현 수익(확정)
-    total_injected_krw = 0   # 총 투입된 한화 원금 (수익률 계산용)
+    current_jpy = 0; current_principal = 0; realized_profit = 0; total_injected_krw = 0
+    portfolio_records = []; performance_by_date = []
     
-    portfolio_records = []
-    performance_by_date = [] # 기간별 분석용 데이터
-
-    # 시간순 정렬
     sorted_trades = sorted(st.session_state.portfolio, key=lambda x: x['id'])
-    
     for t in sorted_trades:
-        t_type = t.get('type', 'buy')
-        amt = t['amount_jpy']
-        r = t['rate'] / 100
-        krw_val = amt * r
-        t_date = t['date']
-        
-        if t_type == 'buy':
-            current_jpy += amt
-            current_principal += krw_val
-            total_injected_krw += krw_val
-            
-            portfolio_records.append({
-                'ID': t['id'], '날짜': t_date, '구분': '🔴 매수', 
-                '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"
-            })
+        amt = t['amount_jpy']; r = t['rate'] / 100; krw_val = amt * r; t_date = t['date']
+        if t.get('type', 'buy') == 'buy':
+            current_jpy += amt; current_principal += krw_val; total_injected_krw += krw_val
+            portfolio_records.append({'ID': t['id'], '날짜': t_date, '구분': '🔴 매수', '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"})
         else:
-            # 매도 시: 매도 직전의 평균 단가 계산
             avg_cost = current_principal / current_jpy if current_jpy > 0 else 0
-            # 실현 수익 = 매도액 - (매도수량 * 매수평단)
-            trade_profit = krw_val - (amt * avg_cost)
-            realized_profit += trade_profit
-            
-            current_jpy -= amt
-            current_principal -= (amt * avg_cost)
-            
-            portfolio_records.append({
-                'ID': t['id'], '날짜': t_date, '구분': '🔵 매도', 
-                '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"
-            })
-
-        # 실시간 누적 성과 기록 (기간 분석용)
+            trade_profit = krw_val - (amt * avg_cost); realized_profit += trade_profit
+            current_jpy -= amt; current_principal -= (amt * avg_cost)
+            portfolio_records.append({'ID': t['id'], '날짜': t_date, '구분': '🔵 매도', '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"})
+        
         temp_unrealized = (current_jpy * (latest['krw_jpy'] / 100)) - current_principal
-        performance_by_date.append({
-            'date': t_date,
-            'cumulative_profit': realized_profit + temp_unrealized
-        })
+        performance_by_date.append({'date': t_date, 'cumulative_profit': realized_profit + temp_unrealized})
 
-    # 최종 결과 계산
-    current_value_krw = current_jpy * (latest['krw_jpy'] / 100)
-    unrealized_profit = current_value_krw - current_principal
-    total_combined_profit = realized_profit + unrealized_profit
-    
-    # 최종 수익률 (ROI) = 총 수익 / 총 투입 원금
-    total_roi = (total_combined_profit / total_injected_krw * 100) if total_injected_krw > 0 else 0
-    avg_buy_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
+    cur_val_krw = current_jpy * (latest['krw_jpy'] / 100)
+    unrealized = cur_val_krw - current_principal; total_p = realized_profit + unrealized
+    total_roi = (total_p / total_injected_krw * 100) if total_injected_krw > 0 else 0
+    avg_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
 
-    # --- UI: 핵심 지표 하이라이트 ---
     st.markdown(f"""
-    <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_combined_profit >= 0 else '#ef4444'}; border-radius: 12px; padding: 25px; text-align: center; margin-bottom: 25px;">
-        <p style="color: #94a3b8; font-size: 16px; font-weight: bold; margin-bottom: 5px;">🏆 기간 누적 최종 투자 성과 (Total Performance)</p>
-        <h2 style="color: {'#10b981' if total_combined_profit >= 0 else '#ef4444'}; margin: 0; font-size: 42px; font-weight: 900;">
-            {'+' if total_combined_profit > 0 else ''}{total_combined_profit:,.0f} 원 
-            <span style="font-size: 28px;">({'+' if total_roi > 0 else ''}{total_roi:.2f}%)</span>
+    <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_p >= 0 else '#ef4444'}; border-radius: 12px; padding: 25px; text-align: center; margin-bottom: 25px;">
+        <p style="color: #94a3b8; font-size: 16px; font-weight: bold;">🏆 기간 누적 최종 투자 성과</p>
+        <h2 style="color: {'#10b981' if total_p >= 0 else '#ef4444'}; font-size: 42px; font-weight: 900;">
+            {'+' if total_p > 0 else ''}{total_p:,.0f} 원 ({'+' if total_roi > 0 else ''}{total_roi:.2f}%)
         </h2>
-        <p style="color: #64748b; font-size: 14px; margin-top: 10px;">총 투입 원금: ₩ {total_injected_krw:,.0f} | 현재 평가액: ₩ {current_value_krw + realized_profit:,.0f}</p>
     </div>
     """, unsafe_allow_html=True)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("보유 잔고", f"¥ {current_jpy:,.0f}")
-    c2.metric("나의 매수평단", f"{avg_buy_rate:.2f} 원")
-    c3.metric("평가 손익 (보유분)", f"₩ {unrealized_profit:,.0f}", f"{(unrealized_profit/current_principal*100 if current_principal>0 else 0):.2f}%")
-    c4.metric("실현 수익 (매도확정)", f"₩ {realized_profit:,.0f}", "수익 확정")
+    c1.metric("보유 잔고", f"¥ {current_jpy:,.0f}"); c2.metric("매수평단", f"{avg_rate:.2f}원")
+    c3.metric("평가 손익", f"₩ {unrealized:,.0f}"); c4.metric("실현 수익", f"₩ {realized_profit:,.0f}")
 
     st.markdown("---")
-    
-    # 2. 기간별 누적 수익률 분석 (월별 요약)
     st.subheader("📅 월별 누적 성과 요약")
     if portfolio_records:
         df_temp = pd.DataFrame(sorted_trades)
-        df_temp['date
+        df_temp['date'] = pd.to_datetime(df_temp['date'])
+        df_temp['Month'] = df_temp['date'].dt.strftime('%Y-%m')
+        monthly_summary = []
+        months = sorted(df_temp['Month'].unique())
+        last_cum = 0
+        for m in months:
+            m_trades = df_temp[df_temp['Month'] == m]
+            last_id = m_trades['id'].max()
+            idx = [i for i, x in enumerate(sorted_trades) if x['id'] == last_id][0]
+            current_m_profit = performance_by_date[idx]['cumulative_profit']
+            monthly_summary.append({'기간': m, '누적 수익금': f"₩ {current_m_profit:,.0f}", '상태': "📈" if current_m_profit >= last_cum else "📉"})
+            last_cum = current_m_profit
+        st.table(pd.DataFrame(monthly_summary))
+
+    st.markdown("---")
+    st.subheader("📝 거래 내역 기록")
+    with st.form("add_v2", clear_on_submit=True):
+        f1, f2, f3, f4 = st.columns([1.5, 2, 2, 1.5])
+        t_in = f1.radio("q", ["🔴 매수", "🔵 매도"], label_visibility="collapsed")
+        amt_in = f2.number_input("수량(JPY)", min_value=0, step=10000)
+        rate_in = f3.number_input("환율(원/100엔)", min_value=0.0, format="%.2f")
+        if f4.form_submit_button("➕ 추가") and amt_in > 0:
+            is_buy = "매수" in t_in
+            if not is_buy and amt_in > current_jpy: st.error("잔고 부족!")
+            else:
+                new_t = {'id': int(time.time()*1000), 'date': datetime.now().strftime("%Y-%m-%d"), 'type': 'buy' if is_buy else 'sell', 'amount_jpy': amt_in, 'rate': rate_in}
+                st.session_state.portfolio.append(new_t); add_trade_to_db(new_t); st.rerun()
+
+    if portfolio_records:
+        st.dataframe(pd.DataFrame(portfolio_records), use_container_width=True, hide_index=True)
+        d1, d2, d3 = st.columns([2, 1, 1])
+        del_id = d1.number_input("ID", min_value=0, step=1, label_visibility="collapsed")
+        if d2.button("삭제", use_container_width=True):
+            st.session_state.portfolio = [t for t in st.session_state.portfolio if t['id'] != del_id]
+            delete_trade_from_db(del_id); st.rerun()
+        csv = pd.DataFrame(portfolio_records).to_csv(index=False).encode('utf-8-sig')
+        d3.download_button("💾 백업", data=csv, file_name="yen.csv", use_container_width=True)
+
+# ==========================================
+# 탭 3: 투자 전략 백과
+# ==========================================
+with tab3:
+    st.header("성공하는 투자자들의 엔화 기법")
+    with st.expander("1. 환율 밴드 기반 그리드 트레이딩", expanded=True):
+        st.write("- 역사적 저점과 고점을 밴드로 설정하고 기계적으로 분할 매매하는 기법입니다.")
+    with st.expander("2. 미·일 금리차 역추적"):
+        st.write("- 미국 금리가 하락 반전할 때가 최고의 엔화 매수 타이밍입니다.")
+    with st.expander("📈 기술적 지표 활용법"):
+        st.write("- 볼린저 밴드 하단 터치 시 매수, 상단 터치 시 매도 확률이 높습니다.")
