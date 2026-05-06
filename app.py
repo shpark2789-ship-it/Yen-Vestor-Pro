@@ -416,163 +416,92 @@ with tab1:
             st.success(f"{i}. {r}")
 
 # ==========================================
-# 탭 2: 내 자산 관리 (포트폴리오 장부 및 수익률 관리)
+# 탭 2: 내 자산 관리 (성과 분석 및 기간별 수익률)
 # ==========================================
 with tab2:
-    st.subheader("📊 종합 자산 및 수익률 대시보드")
+    st.subheader("📊 투자 성과 및 수익률 정밀 분석")
     
-    current_jpy = 0
-    current_principal = 0
-    realized_profit = 0
-    total_invested_max = 0
+    # 1. 누적 장부 계산 로직
+    current_jpy = 0          # 보유 수량
+    current_principal = 0    # 보유 수량에 대한 원금
+    realized_profit = 0      # 실현 수익(확정)
+    total_injected_krw = 0   # 총 투입된 한화 원금 (수익률 계산용)
     
-    portfolio_df_data = []
+    portfolio_records = []
+    performance_by_date = [] # 기간별 분석용 데이터
+
+    # 시간순 정렬
+    sorted_trades = sorted(st.session_state.portfolio, key=lambda x: x['id'])
     
-    for t in sorted(st.session_state.portfolio, key=lambda x: x['id']):
+    for t in sorted_trades:
         t_type = t.get('type', 'buy')
         amt = t['amount_jpy']
         r = t['rate'] / 100
-        krw_amt = amt * r
+        krw_val = amt * r
+        t_date = t['date']
         
         if t_type == 'buy':
             current_jpy += amt
-            current_principal += krw_amt
-            total_invested_max += krw_amt
+            current_principal += krw_val
+            total_injected_krw += krw_val
             
-            portfolio_df_data.append({
-                'ID': t['id'], 
-                '거래일자': t['date'], 
-                '구분': '🔴 매수', 
-                '엔화(¥)': f"¥ {amt:,.0f}", 
-                '적용환율': f"{t['rate']:.2f} 원", 
-                '거래금액(₩)': f"₩ {krw_amt:,.0f}"
+            portfolio_records.append({
+                'ID': t['id'], '날짜': t_date, '구분': '🔴 매수', 
+                '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"
             })
-        else: 
+        else:
+            # 매도 시: 매도 직전의 평균 단가 계산
             avg_cost = current_principal / current_jpy if current_jpy > 0 else 0
-            trade_profit = krw_amt - (amt * avg_cost)
+            # 실현 수익 = 매도액 - (매도수량 * 매수평단)
+            trade_profit = krw_val - (amt * avg_cost)
             realized_profit += trade_profit
             
             current_jpy -= amt
             current_principal -= (amt * avg_cost)
             
-            if current_jpy <= 0.01:
-                current_jpy = 0
-                current_principal = 0
-                
-            portfolio_df_data.append({
-                'ID': t['id'], 
-                '거래일자': t['date'], 
-                '구분': '🔵 매도', 
-                '엔화(¥)': f"¥ {amt:,.0f}", 
-                '적용환율': f"{t['rate']:.2f} 원", 
-                '거래금액(₩)': f"₩ {krw_amt:,.0f}"
+            portfolio_records.append({
+                'ID': t['id'], '날짜': t_date, '구분': '🔵 매도', 
+                '엔화': f"¥ {amt:,.0f}", '환율': f"{t['rate']:.2f}", '한화': f"₩ {krw_val:,.0f}"
             })
-            
-    avg_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
-    current_krw_value = current_jpy * (latest['krw_jpy'] / 100)
-    
-    unrealized_profit = current_krw_value - current_principal
-    unrealized_profit_pct = (unrealized_profit / current_principal * 100) if current_principal > 0 else 0
-    
-    total_profit = unrealized_profit + realized_profit
-    total_profit_pct = (total_profit / total_invested_max * 100) if total_invested_max > 0 else 0
 
+        # 실시간 누적 성과 기록 (기간 분석용)
+        temp_unrealized = (current_jpy * (latest['krw_jpy'] / 100)) - current_principal
+        performance_by_date.append({
+            'date': t_date,
+            'cumulative_profit': realized_profit + temp_unrealized
+        })
+
+    # 최종 결과 계산
+    current_value_krw = current_jpy * (latest['krw_jpy'] / 100)
+    unrealized_profit = current_value_krw - current_principal
+    total_combined_profit = realized_profit + unrealized_profit
+    
+    # 최종 수익률 (ROI) = 총 수익 / 총 투입 원금
+    total_roi = (total_combined_profit / total_injected_krw * 100) if total_injected_krw > 0 else 0
+    avg_buy_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
+
+    # --- UI: 핵심 지표 하이라이트 ---
     st.markdown(f"""
-    <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_profit >= 0 else '#ef4444'}; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px;">
-        <p style="color: #94a3b8; font-size: 16px; font-weight: bold; margin-bottom: 5px;">🔥 기간 누적 최종 수익 (평가 손익 + 이미 확정된 실현 손익)</p>
-        <h2 style="color: {'#10b981' if total_profit >= 0 else '#ef4444'}; margin: 0; font-size: 36px; font-weight: 900;">
-            {'+' if total_profit > 0 else ''}{total_profit:,.0f} 원 
-            <span style="font-size: 24px;">({'+' if total_profit_pct > 0 else ''}{total_profit_pct:.2f}%)</span>
+    <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_combined_profit >= 0 else '#ef4444'}; border-radius: 12px; padding: 25px; text-align: center; margin-bottom: 25px;">
+        <p style="color: #94a3b8; font-size: 16px; font-weight: bold; margin-bottom: 5px;">🏆 기간 누적 최종 투자 성과 (Total Performance)</p>
+        <h2 style="color: {'#10b981' if total_combined_profit >= 0 else '#ef4444'}; margin: 0; font-size: 42px; font-weight: 900;">
+            {'+' if total_combined_profit > 0 else ''}{total_combined_profit:,.0f} 원 
+            <span style="font-size: 28px;">({'+' if total_roi > 0 else ''}{total_roi:.2f}%)</span>
         </h2>
+        <p style="color: #64748b; font-size: 14px; margin-top: 10px;">총 투입 원금: ₩ {total_injected_krw:,.0f} | 현재 평가액: ₩ {current_value_krw + realized_profit:,.0f}</p>
     </div>
     """, unsafe_allow_html=True)
 
-    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-    p_col1.metric("총 보유 엔화 잔고", f"¥ {current_jpy:,.0f}")
-    p_col2.metric("내 평균 매수 단가", f"{avg_rate:.2f} 원")
-    p_col3.metric("평가 손익 (보유분)", f"₩ {unrealized_profit:,.0f}", f"{unrealized_profit_pct:.2f}%")
-    p_col4.metric("누적 실현 손익 (매도 확정)", f"₩ {realized_profit:,.0f}", "현금화 완료")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("보유 잔고", f"¥ {current_jpy:,.0f}")
+    c2.metric("나의 매수평단", f"{avg_buy_rate:.2f} 원")
+    c3.metric("평가 손익 (보유분)", f"₩ {unrealized_profit:,.0f}", f"{(unrealized_profit/current_principal*100 if current_principal>0 else 0):.2f}%")
+    c4.metric("실현 수익 (매도확정)", f"₩ {realized_profit:,.0f}", "수익 확정")
 
     st.markdown("---")
-    st.subheader("📝 거래 내역 추가 및 관리")
     
-    with st.form("add_trade_form", clear_on_submit=True):
-        f_col1, f_col2, f_col3, f_col4 = st.columns([1.5, 2, 2, 1.5])
-        
-        trade_type = f_col1.radio("거래 구분", ["🔴 매수", "🔵 매도"], label_visibility="collapsed")
-        amt_input = f_col2.number_input("거래 엔화 (JPY)", min_value=0, step=10000)
-        rate_input = f_col3.number_input("적용 환율 (원/100엔)", min_value=0.0, format="%.2f")
-        submitted = f_col4.form_submit_button("➕ 기록 추가")
-        
-        if submitted and amt_input > 0 and rate_input > 0:
-            is_buy = "매수" in trade_type
-            
-            if not is_buy and amt_input > current_jpy:
-                st.error(f"보유 잔고(¥ {current_jpy:,.0f})를 초과하여 매도할 수 없습니다!")
-            else:
-                new_id = int(time.time() * 1000) # 고유 ID 생성 (밀리초)
-                new_trade = {
-                    'id': new_id,
-                    'date': datetime.now().strftime("%Y-%m-%d"),
-                    'type': 'buy' if is_buy else 'sell',
-                    'amount_jpy': amt_input,
-                    'rate': rate_input
-                }
-                st.session_state.portfolio.append(new_trade)
-                
-                # ☁️ 클라우드 DB에 개별 기록 즉시 추가
-                add_trade_to_db(new_trade)
-                st.rerun()
-
-    if portfolio_df_data:
-        df_port = pd.DataFrame(portfolio_df_data)
-        st.dataframe(df_port, use_container_width=True, hide_index=True)
-        
-        st.markdown("#### 🗑️ 기록 삭제 및 백업")
-        del_col1, del_col2, del_col3 = st.columns([2, 1, 1])
-        del_id = del_col1.number_input("삭제할 거래 ID", min_value=0, step=1, label_visibility="collapsed")
-        
-        if del_col2.button("선택 기록 삭제", use_container_width=True):
-            st.session_state.portfolio = [t for t in st.session_state.portfolio if t['id'] != del_id]
-            # ☁️ 클라우드 DB에서도 해당 기록 즉시 삭제
-            delete_trade_from_db(del_id)
-            st.rerun()
-            
-        csv_data = df_port.to_csv(index=False).encode('utf-8-sig')
-        del_col3.download_button("💾 엑셀(CSV) 백업", data=csv_data, file_name="yen_portfolio.csv", mime="text/csv", use_container_width=True)
-    else:
-        st.info("아직 등록된 거래 내역이 없습니다.")
-
-# ==========================================
-# 탭 3: 투자 전략 백과
-# ==========================================
-with tab3:
-    st.header("성공하는 투자자들의 엔화 기법")
-    
-    with st.expander("1. 환율 밴드 기반 그리드(Grid) 트레이딩", expanded=True):
-        st.write("""
-        - 가장 많은 투자자들이 사용하는 방법입니다. 역사적 저점과 고점을 밴드로 설정합니다.
-        - 정해진 간격(예: 5원 단위)으로 하락할 때마다 **기계적으로 분할 매수**하고, 오를 때마다 분할 매도합니다.
-        - **Tip:** 절대 한 번에 몰빵하지 마세요. 바닥은 아무도 모릅니다.
-        """)
-        
-    with st.expander("2. 미·일 금리차 역추적 (Macro Following)"):
-        st.write("""
-        - 엔화 약세의 핵심 원인인 '미국-일본 간 금리차'를 추적합니다.
-        - **미국 10년물 금리가 하락 반전**하거나, 일본은행이 금리를 인상할 때 매수합니다.
-        - **Tip:** 대시보드의 '미국 10년물 금리' 하락 신호가 떴을 때가 최고의 매수 타이밍입니다.
-        """)
-        
-    with st.expander("3. 안전 자산 선호 (Safe-Haven) 피크 아웃"):
-        st.write("""
-        - 전쟁이나 경제 위기 시 VIX(공포지수)가 폭등하며 안전자산인 엔화로 자금이 몰려 환율이 단기 급등합니다.
-        - 평소에 모아둔 엔화를 이때 차익 실현(매도)합니다.
-        - **Tip:** VIX 지수가 25~30을 넘어가는 시장 패닉이 최고의 매도 찬스입니다.
-        """)
-        
-    with st.expander("📈 기술적 지표 (이평선, 볼린저밴드, 캔들) 활용법"):
-        st.write("""
-        - **이동평균선 (MA20):** 단기 20일간의 가격 평균. 추세의 방향을 보여줍니다.
-        - **볼린저 밴드:** 가격이 움직이는 정상 궤도. **하단 터치 시 매수**, **상단 터치 시 매도** 확률이 높습니다.
-        - **캔들 (봉):** 빨간색(양봉)은 상승, 파란색(음봉)은 하락을 의미합니다. 꼬리가 길게 달린 모양(망치형 등)은 추세 반전을 예고합니다.
-        """)
+    # 2. 기간별 누적 수익률 분석 (월별 요약)
+    st.subheader("📅 월별 누적 성과 요약")
+    if portfolio_records:
+        df_temp = pd.DataFrame(sorted_trades)
+        df_temp['date
