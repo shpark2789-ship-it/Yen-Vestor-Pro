@@ -316,7 +316,6 @@ with tab2:
 
     total_p = realized_p + ((cur_jpy * (latest['krw_jpy'] / 100)) - cur_principal)
     total_roi = (total_p / total_buy_krw * 100) if total_buy_krw > 0 else 0
-    avg_rate = (current_principal / cur_jpy * 100) if cur_jpy > 0 else 0 # (Note: UI code placeholder)
     avg_rate = (cur_principal / cur_jpy * 100) if cur_jpy > 0 else 0
 
     st.markdown(f"""
