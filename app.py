@@ -209,22 +209,32 @@ def _generate_fallback_data():
 st.title("💴 Yen-Vestor Pro (실시간 웹 대시보드)")
 st.markdown("전 세계 금융 API와 연동된 **가장 완벽한 엔화 투자 AI 시뮬레이터**입니다.")
 
-# 포트폴리오 세션 초기화
+# 포트폴리오 세션 초기화 (매수/매도 구분 추가)
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = [
-        {'id': 1, 'date': '2025-10-15', 'amount_jpy': 500000, 'rate': 905.20}
+        {'id': 1, 'date': '2025-10-15', 'type': 'buy', 'amount_jpy': 500000, 'rate': 905.20}
     ]
 
 # --- UI: 차트 봉(시간) 선택 ---
 # 브라우저 렌더링 부하(렉)를 방지하기 위해 period(조회 기간)를 매우 현실적이고 가볍게 최적화함
 timeframe_map = {
-    "30분": {"period": "1mo", "interval": "30m"}, # 기존 60d -> 1mo (데이터포인트 대폭 감소)
-    "1시간": {"period": "3mo", "interval": "1h"},  # 기존 730d(17000개) -> 3mo(약 500개)로 30배 경량화
+    "30분": {"period": "1mo", "interval": "30m"}, 
+    "1시간": {"period": "3mo", "interval": "1h"},  
     "일봉": {"period": "1y", "interval": "1d"},
     "주봉": {"period": "3y", "interval": "1wk"},
     "월봉": {"period": "10y", "interval": "1mo"},
     "분기봉": {"period": "20y", "interval": "3mo"}
 }
+
+# 데이터 로딩 실행
+with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
+    # 현재 선택된 탭과 무관하게 데이터는 공통으로 불러옵니다.
+    # 초기 로딩 시 기본값(일봉)으로 데이터 로드
+    df, latest, is_live = fetch_global_data(period="1y", interval="1d")
+
+# 🚨 차단 방어 성공 알림 (서버 차단 시 시뮬레이션 모드 안내)
+if not is_live:
+    st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
 
 # --- 탭 구성 ---
 tab1, tab2, tab3 = st.tabs(["📊 AI 대시보드 (차트 분석)", "💼 내 자산 관리", "📖 투자 전략 백과"])
@@ -244,17 +254,11 @@ with tab1:
         label_visibility="collapsed"
     )
     
-    # 선택된 기간으로 데이터 로딩 실행
-    with st.spinner("안전하게 글로벌 금융 데이터를 동기화 중입니다..."):
-        df, latest, is_live = fetch_global_data(
-            period=timeframe_map[selected_tf]["period"], 
-            interval=timeframe_map[selected_tf]["interval"]
-        )
-
-    # 🚨 차단 방어 성공 알림 (서버 차단 시 시뮬레이션 모드 안내)
-    if not is_live:
-        st.warning("⚠️ 현재 글로벌 금융 서버(Yahoo) 응답이 지연되어, 앱이 뻗지 않도록 **AI 시뮬레이션 모드(가상 데이터)**로 자동 전환되었습니다. (UI 및 기능은 100% 정상 작동합니다)")
-
+    # 사용자가 라디오 버튼을 바꾸면 해당 기간으로 다시 로드
+    df_chart, latest_chart, _ = fetch_global_data(
+        period=timeframe_map[selected_tf]["period"], 
+        interval=timeframe_map[selected_tf]["interval"]
+    )
 
     # 1. 상단 카드 지표
     col1, col2, col3, col4 = st.columns(4)
@@ -269,10 +273,10 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-    render_metric_card(col1, "💰 현재 환율(원/100엔)", latest['krw_jpy'], "원", get_krw_status)
-    render_metric_card(col2, "💵 달러/엔 환율", latest['usd_jpy'], "엔", get_usd_status)
-    render_metric_card(col3, "🇺🇸 미 국채 10년물", latest['us_yield'], "%", get_yield_status)
-    render_metric_card(col4, "📉 VIX 공포지수", latest['vix'], "", get_vix_status)
+    render_metric_card(col1, "💰 현재 환율(원/100엔)", latest_chart['krw_jpy'], "원", get_krw_status)
+    render_metric_card(col2, "💵 달러/엔 환율", latest_chart['usd_jpy'], "엔", get_usd_status)
+    render_metric_card(col3, "🇺🇸 미 국채 10년물", latest_chart['us_yield'], "%", get_yield_status)
+    render_metric_card(col4, "📉 VIX 공포지수", latest_chart['vix'], "", get_vix_status)
 
     st.write("") # 여백
 
@@ -283,18 +287,18 @@ with tab1:
     fig = go.Figure()
     
     # 볼린저 밴드 영역
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.5)', dash='dash'), name='볼린저 상단'))
-    fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(16, 185, 129, 0.5)', dash='dash'), fill='tonexty', fillcolor='rgba(203, 213, 225, 0.1)', name='볼린저 하단'))
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Upper'], line=dict(color='rgba(148, 163, 184, 0.5)', dash='dash'), name='볼린저 상단'))
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['BB_Lower'], line=dict(color='rgba(16, 185, 129, 0.5)', dash='dash'), fill='tonexty', fillcolor='rgba(203, 213, 225, 0.1)', name='볼린저 하단'))
     
     # 20일 이동평균선
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='#f59e0b', width=2), name='20선 (이동평균)'))
+    fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], line=dict(color='#f59e0b', width=2), name='20선 (이동평균)'))
     
     # [새로운 기능] 캔들스틱 (봉 차트) - 한국 주식 시장 컬러(상승: 빨강, 하락: 파랑) 완벽 적용
     fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        increasing_line_color='#ef4444', increasing_fillcolor='#ef4444', # 한국 패치: 상승(양봉) = 빨간색
-        decreasing_line_color='#3b82f6', decreasing_fillcolor='#3b82f6', # 한국 패치: 하락(음봉) = 파란색
+        x=df_chart.index,
+        open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'],
+        increasing_line_color='#ef4444', increasing_fillcolor='#ef4444', 
+        decreasing_line_color='#3b82f6', decreasing_fillcolor='#3b82f6', 
         name='원/100엔 캔들'
     ))
 
@@ -306,7 +310,7 @@ with tab1:
     fig.update_layout(
         height=500, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#f8fafc', paper_bgcolor='#f8fafc',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        xaxis_rangeslider_visible=False # 캔들 차트의 부피를 차지하는 미니 슬라이더 끔
+        xaxis_rangeslider_visible=False 
     )
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(0,0,0,0.05)')
@@ -315,10 +319,9 @@ with tab1:
 
     # 3. [신규] 🕯️ AI 캔들 & 차트 패턴 분석
     st.markdown("### 🕯️ AI 캔들 & 차트 패턴 실시간 분석")
-    candle_patterns = analyze_candles(df)
+    candle_patterns = analyze_candles(df_chart)
     
     for pattern in candle_patterns:
-        # 패턴의 종류에 따라 색상을 다르게 표현 (경고, 성공, 안내)
         if "장악형" in pattern and "하락" in pattern or "유성형" in pattern:
             st.warning(pattern)
         elif "장악형" in pattern and "상승" in pattern or "망치형" in pattern:
@@ -342,7 +345,6 @@ with tab1:
             "최종 매수/매도 확률(Conviction Score) 산출 완료!"
         ]
         
-        # 렉을 유발하던 100번의 불필요한 루프를 부드러운 5단계(20%씩) 스텝으로 경량화
         for i in range(5):
             time.sleep(0.3)
             progress_bar.progress((i + 1) * 20)
@@ -353,21 +355,21 @@ with tab1:
         # AI 점수 계산 로직
         score = 50
         reasons = []
-        cur_price = latest['krw_jpy']
+        cur_price = latest_chart['krw_jpy']
 
-        if latest['rsi'] <= 30: score += 20; reasons.append(f"🟣 RSI {latest['rsi']}% (과매도): 시장의 투매가 멈추고 기술적 반등 임박.")
-        elif latest['rsi'] >= 70: score -= 20; reasons.append(f"🟣 RSI {latest['rsi']}% (과매수): 단기 과열 상태. 조정 예상.")
+        if latest_chart['rsi'] <= 30: score += 20; reasons.append(f"🟣 RSI {latest_chart['rsi']}% (과매도): 시장의 투매가 멈추고 기술적 반등 임박.")
+        elif latest_chart['rsi'] >= 70: score -= 20; reasons.append(f"🟣 RSI {latest_chart['rsi']}% (과매수): 단기 과열 상태. 조정 예상.")
             
-        if cur_price <= latest['bb_lower'] * 1.01: score += 15; reasons.append("☁️ 볼린저 밴드 하단 터치: 튕겨오를 확률이 높은 저점.")
-        elif cur_price >= latest['bb_upper'] * 0.99: score -= 15; reasons.append("☁️ 볼린저 밴드 상단 터치: 저항선 부딪힘. 하락 가능성.")
+        if cur_price <= latest_chart['bb_lower'] * 1.01: score += 15; reasons.append("☁️ 볼린저 밴드 하단 터치: 튕겨오를 확률이 높은 저점.")
+        elif cur_price >= latest_chart['bb_upper'] * 0.99: score -= 15; reasons.append("☁️ 볼린저 밴드 상단 터치: 저항선 부딪힘. 하락 가능성.")
             
-        if cur_price > latest['ma20']: score += 5; reasons.append("🟡 이동평균선 상회: 단기 추세가 우상향을 타고 있음.")
+        if cur_price > latest_chart['ma20']: score += 5; reasons.append("🟡 이동평균선 상회: 단기 추세가 우상향을 타고 있음.")
         else: score -= 5; reasons.append("🟡 이동평균선 하회: 단기 추세 꺾임.")
 
-        if latest['usd_jpy'] > 150: score += 10; reasons.append("🌎 달러/엔 150엔 돌파: BOJ의 시장 개입 가능성 상승 (엔화 강세 압력).")
-        if latest['us_yield'] > 4.5: score -= 10; reasons.append("🌎 미 국채 10년물 강세: 글로벌 자금이 미국으로 몰려 엔화 약세 유지.")
-        elif latest['us_yield'] < 4.0: score += 15; reasons.append("🌎 미 국채 금리 하락: 글로벌 자금이 일본으로 돌아갈 환경 조성.")
-        if latest['vix'] > 25: score += 15; reasons.append("🚨 VIX 공포지수 급등: 위기로 인한 안전자산(엔화) 단기 쏠림 현상.")
+        if latest_chart['usd_jpy'] > 150: score += 10; reasons.append("🌎 달러/엔 150엔 돌파: BOJ의 시장 개입 가능성 상승 (엔화 강세 압력).")
+        if latest_chart['us_yield'] > 4.5: score -= 10; reasons.append("🌎 미 국채 10년물 강세: 글로벌 자금이 미국으로 몰려 엔화 약세 유지.")
+        elif latest_chart['us_yield'] < 4.0: score += 15; reasons.append("🌎 미 국채 금리 하락: 글로벌 자금이 일본으로 돌아갈 환경 조성.")
+        if latest_chart['vix'] > 25: score += 15; reasons.append("🚨 VIX 공포지수 급등: 위기로 인한 안전자산(엔화) 단기 쏠림 현상.")
 
         score = max(0, min(100, int(score)))
 
@@ -385,53 +387,134 @@ with tab1:
             st.success(f"{i}. {r}")
 
 # ==========================================
-# 탭 2: 내 자산 관리
+# 탭 2: 내 자산 관리 (포트폴리오 장부 및 수익률 관리)
 # ==========================================
 with tab2:
-    st.subheader("포트폴리오 요약")
+    st.subheader("📊 종합 자산 및 수익률 대시보드")
     
-    total_jpy = sum(t['amount_jpy'] for t in st.session_state.portfolio)
-    total_krw_invested = sum(t['amount_jpy'] * (t['rate'] / 100) for t in st.session_state.portfolio)
-    avg_rate = (total_krw_invested / total_jpy * 100) if total_jpy > 0 else 0
-    current_value_krw = total_jpy * (latest['krw_jpy'] / 100)
-    profit_krw = current_value_krw - total_krw_invested
-    profit_percent = (profit_krw / total_krw_invested * 100) if total_krw_invested > 0 else 0
+    # 1. 장부(Ledger) 계산 로직 - 매수/매도 실시간 처리
+    current_jpy = 0          # 현재 쥐고 있는 원금(엔화)
+    current_principal = 0    # 현재 쥐고 있는 원금(원화)
+    realized_profit = 0      # 매도를 통해 이미 지갑에 확정된 수익
+    total_invested_max = 0   # 수익률 계산을 위한 누적 투입 원금의 총합
+    
+    portfolio_df_data = []
+    
+    # 거래 내역을 시간순(ID순)으로 정렬하여 하나씩 장부를 작성합니다.
+    for t in sorted(st.session_state.portfolio, key=lambda x: x['id']):
+        t_type = t.get('type', 'buy')
+        amt = t['amount_jpy']
+        r = t['rate'] / 100
+        krw_amt = amt * r
+        
+        if t_type == 'buy':
+            current_jpy += amt
+            current_principal += krw_amt
+            total_invested_max += krw_amt
+            
+            portfolio_df_data.append({
+                'ID': t['id'], 
+                '거래일자': t['date'], 
+                '구분': '🔴 매수', 
+                '엔화(¥)': f"¥ {amt:,.0f}", 
+                '적용환율': f"{t['rate']:.2f} 원", 
+                '거래금액(₩)': f"₩ {krw_amt:,.0f}"
+            })
+        else: 
+            # 매도 시: 매도 직전의 '평균 단가'를 계산하여 실현 손익을 구합니다.
+            avg_cost = current_principal / current_jpy if current_jpy > 0 else 0
+            # 실현 수익 = 매도해서 받은 원화 - (매도한 엔화 * 평단가)
+            trade_profit = krw_amt - (amt * avg_cost)
+            realized_profit += trade_profit
+            
+            # 남은 자산 차감
+            current_jpy -= amt
+            current_principal -= (amt * avg_cost)
+            
+            # 혹시 모를 소수점 이하 오차 교정
+            if current_jpy <= 0.01:
+                current_jpy = 0
+                current_principal = 0
+                
+            portfolio_df_data.append({
+                'ID': t['id'], 
+                '거래일자': t['date'], 
+                '구분': '🔵 매도', 
+                '엔화(¥)': f"¥ {amt:,.0f}", 
+                '적용환율': f"{t['rate']:.2f} 원", 
+                '거래금액(₩)': f"₩ {krw_amt:,.0f}"
+            })
+            
+    # 2. 결과 연산
+    avg_rate = (current_principal / current_jpy * 100) if current_jpy > 0 else 0
+    current_krw_value = current_jpy * (latest['krw_jpy'] / 100)
+    
+    # 평가 손익 (안 팔고 쥐고 있는 것의 현재 가치 차이)
+    unrealized_profit = current_krw_value - current_principal
+    unrealized_profit_pct = (unrealized_profit / current_principal * 100) if current_principal > 0 else 0
+    
+    # 최종 누적 총 수익률 (실현 손익 + 평가 손익)
+    total_profit = unrealized_profit + realized_profit
+    total_profit_pct = (total_profit / total_invested_max * 100) if total_invested_max > 0 else 0
 
-    p_col1, p_col2, p_col3 = st.columns(3)
-    p_col1.metric("총 보유 엔화", f"¥ {total_jpy:,.0f}")
-    p_col2.metric("내 평균 단가", f"{avg_rate:.2f} 원")
-    p_col3.metric("평가 손익 (원)", f"₩ {profit_krw:,.0f}", f"{profit_percent:.2f}%")
+    # --- UI 출력: 종합 대시보드 ---
+    # 총 누적 수익률 하이라이트 박스
+    st.markdown(f"""
+    <div style="background-color: #0f172a; border: 2px solid {'#10b981' if total_profit >= 0 else '#ef4444'}; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 20px;">
+        <p style="color: #94a3b8; font-size: 16px; font-weight: bold; margin-bottom: 5px;">🔥 기간 누적 최종 수익 (평가 손익 + 이미 확정된 실현 손익)</p>
+        <h2 style="color: {'#10b981' if total_profit >= 0 else '#ef4444'}; margin: 0; font-size: 36px; font-weight: 900;">
+            {'+' if total_profit > 0 else ''}{total_profit:,.0f} 원 
+            <span style="font-size: 24px;">({'+' if total_profit_pct > 0 else ''}{total_profit_pct:.2f}%)</span>
+        </h2>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 4분할 세부 지표
+    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+    p_col1.metric("총 보유 엔화 잔고", f"¥ {current_jpy:,.0f}")
+    p_col2.metric("내 평균 매수 단가", f"{avg_rate:.2f} 원")
+    p_col3.metric("평가 손익 (보유분)", f"₩ {unrealized_profit:,.0f}", f"{unrealized_profit_pct:.2f}%")
+    p_col4.metric("누적 실현 손익 (매도 확정)", f"₩ {realized_profit:,.0f}", "현금화 완료")
 
     st.markdown("---")
-    st.subheader("거래 내역 관리")
+    st.subheader("📝 거래 내역 추가 및 관리")
     
-    # 거래 추가 폼
+    # 거래 추가 폼 (매수/매도 라디오 버튼 추가)
     with st.form("add_trade_form", clear_on_submit=True):
-        f_col1, f_col2, f_col3 = st.columns([2, 2, 1])
-        amt_input = f_col1.number_input("매수 엔화 (JPY)", min_value=0, step=10000)
-        rate_input = f_col2.number_input("적용 환율 (원/100엔)", min_value=0.0, format="%.2f")
-        submitted = f_col3.form_submit_button("➕ 기록 추가")
+        f_col1, f_col2, f_col3, f_col4 = st.columns([1.5, 2, 2, 1.5])
+        
+        trade_type = f_col1.radio("거래 구분", ["🔴 매수", "🔵 매도"], label_visibility="collapsed")
+        amt_input = f_col2.number_input("거래 엔화 (JPY)", min_value=0, step=10000)
+        rate_input = f_col3.number_input("적용 환율 (원/100엔)", min_value=0.0, format="%.2f")
+        submitted = f_col4.form_submit_button("➕ 기록 추가")
         
         if submitted and amt_input > 0 and rate_input > 0:
-            new_id = max([t['id'] for t in st.session_state.portfolio] + [0]) + 1
-            st.session_state.portfolio.append({
-                'id': new_id,
-                'date': datetime.now().strftime("%Y-%m-%d"),
-                'amount_jpy': amt_input,
-                'rate': rate_input
-            })
-            st.rerun() # 화면 새로고침
+            is_buy = "매수" in trade_type
+            
+            # 매도 시 보유 잔고보다 많은 금액을 파는지 검증
+            if not is_buy and amt_input > current_jpy:
+                st.error(f"보유 잔고(¥ {current_jpy:,.0f})를 초과하여 매도할 수 없습니다!")
+            else:
+                new_id = max([t['id'] for t in st.session_state.portfolio] + [0]) + 1
+                st.session_state.portfolio.append({
+                    'id': new_id,
+                    'date': datetime.now().strftime("%Y-%m-%d"),
+                    'type': 'buy' if is_buy else 'sell',
+                    'amount_jpy': amt_input,
+                    'rate': rate_input
+                })
+                st.rerun() # 화면 새로고침
 
     # 거래 내역 테이블 출력
-    if st.session_state.portfolio:
-        df_port = pd.DataFrame(st.session_state.portfolio)
-        df_port['투자원금(원)'] = (df_port['amount_jpy'] * (df_port['rate'] / 100)).astype(int)
-        df_port.columns = ['ID', '거래일자', '매수엔화(¥)', '적용환율', '투자원금(₩)']
+    if portfolio_df_data:
+        df_port = pd.DataFrame(portfolio_df_data)
         st.dataframe(df_port, use_container_width=True, hide_index=True)
         
-        # 삭제 기능
-        del_id = st.number_input("삭제할 거래 ID 번호를 입력하세요", min_value=0, step=1)
-        if st.button("🗑️ 선택 기록 삭제"):
+        # 개별 기록 삭제 기능 (깔끔하게 좌우 분할 정렬)
+        st.markdown("#### 🗑️ 기록 삭제")
+        del_col1, del_col2, _ = st.columns([2, 1, 3])
+        del_id = del_col1.number_input("삭제할 거래 ID", min_value=0, step=1, label_visibility="collapsed")
+        if del_col2.button("선택 기록 삭제", use_container_width=True):
             st.session_state.portfolio = [t for t in st.session_state.portfolio if t['id'] != del_id]
             st.rerun()
     else:
